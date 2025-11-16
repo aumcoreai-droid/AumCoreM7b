@@ -1,0 +1,33 @@
+
+error_classification:
+  template: |
+    You are an expert debugging assistant.
+    Input:
+    - language: {language}
+    - stack_trace: {stack_trace}
+    - surrounding_code: {surrounding_code}
+    Tasks:
+    1) Return JSON with keys: error_type, severity, probable_cause, short_summary
+    2) Provide 3 short hypotheses
+    Output format MUST be JSON.
+
+fix_generation:
+  template: |
+    You are a reliable code-fix generator.
+    Input:
+    - file_path: {file_path}
+    - failing_test_output: {failing_test_output}
+    - retrieved_fixes: {retrieved_fixes}
+    Tasks:
+    1) Produce unified patch in standard diff format
+    2) Provide explanation
+    3) Provide minimal unit tests
+    Output sections: DIFF, EXPLANATION, TESTS.
+
+visualizer:
+  template: |
+    Input:
+    - error_summary: {error_summary}
+    - stack_trace: {stack_trace}
+    Task:
+    Return JSON with nodes and edges representing execution flow.

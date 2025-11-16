@@ -1,0 +1,5 @@
+
+retrieval_k: 6
+max_patch_test_time: 12
+lora_epochs: 3
+min_feedback_for_train: 25

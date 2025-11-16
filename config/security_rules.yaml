@@ -1,0 +1,12 @@
+
+max_cpu_seconds: 12
+max_memory_mb: 512
+disk_write_allowed: false
+network_access: false
+restricted_imports:
+  - subprocess
+  - os.system
+  - sys.setrecursionlimit
+secret_patterns:
+  - "AKIA[0-9A-Z]{16}"
+  - "ghp_[A-Za-z0-9_\-]{20,}"
