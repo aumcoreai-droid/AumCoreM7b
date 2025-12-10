@@ -831,7 +831,7 @@ class AutoNotes:
         
         # Extract technology/programming terms (common patterns)
         tech_patterns = [
-            r'(python|java|javascript|c\+\+|rust|go)',
+            r'(python|java|javascript|c\\+\\+|rust|go)',
             r'(ai|ml|nlp|api|database|server)',
             r'(react|vue|angular|django|flask)'
         ]
