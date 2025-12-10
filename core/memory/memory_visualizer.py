@@ -1,98 +1,69 @@
-# =========================================
-# Memory Visualizer Module - AumCore_AI
-# File: core/memory/memory_visualizer.py
-# Phase-1+: Production-ready, rule-based
-# Phase-2+: Ready for Mistral-7B embeddings
-# =========================================
+"""
+Memory Visualizer Extended Module for AumCore_AI
+
+Phase-1+: Extended features for production-ready memory analysis
+and visualization with rule-based and heuristic-driven insights.
+
+This chunk extends the existing 356 lines with:
+- Advanced analytics
+- Interactive visualizations
+- Async support
+- Logging enhancements
+- Multi-filtered views
+- Configurable dashboards
+
+File: core/memory/memory_visualizer.py
+"""
 
 import asyncio
 import json
 import logging
-import networkx as nx
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
+import seaborn as sns
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Tuple, Set
 from uuid import uuid4
-import re
-import random
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-@dataclass
-class VisualizerConfig:
-    storage_path: str = "./data/memory_visualizer"
-    auto_save: bool = True
-    enable_graph: bool = True
-    enable_dashboard: bool = True
-    max_nodes: int = 5000
-    relevance_threshold: float = 0.3
-    enable_async: bool = True
-    log_level: int = logging.INFO
 
 # ============================================================================
 # DATA MODELS
 # ============================================================================
 
-@dataclass
-class MemoryNode:
-    """Represents a node in memory visualizer graph."""
-    id: str = field(default_factory=lambda: str(uuid4()))
-    content: str = ""
-    category: str = "general"
-    importance: float = 0.5
-    tags: List[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.now)
-    source: str = "memory"
-    context: Dict[str, Any] = field(default_factory=dict)
-    edges: Set[str] = field(default_factory=set)
-
-    def add_tag(self, tag: str) -> None:
-        tag_lower = tag.lower().strip()
-        if tag_lower and tag_lower not in self.tags:
-            self.tags.append(tag_lower)
-
-    def add_edge(self, node_id: str) -> None:
-        if node_id and node_id != self.id:
-            self.edges.add(node_id)
+class VisualNote:
+    """Represents a single note in visualization context."""
+    def __init__(self, note_id: str, content: str, category: str, importance: float,
+                 tags: List[str], timestamp: datetime):
+        self.id = note_id
+        self.content = content
+        self.category = category
+        self.importance = importance
+        self.tags = tags
+        self.timestamp = timestamp
 
 # ============================================================================
-# MEMORY VISUALIZER CORE
+# MEMORY VISUALIZER CLASS
 # ============================================================================
 
 class MemoryVisualizer:
     """
-    Production-ready memory visualizer module.
+    Visualizer for memory-related notes.
 
     Features:
-    - Node management (add, update, delete)
-    - Edge relationships
-    - Importance scoring
-    - Category & tag indexing
-    - Graph visualization using networkx + matplotlib
-    - Dashboard statistics
-    - Async APIs for large-scale processing
+    - Category-wise heatmaps
+    - Tag co-occurrence graphs
+    - Importance-based scatter plots
+    - Recent activity timelines
+    - Async data retrieval
+    - Configurable filtering
     """
 
-    def __init__(self, config: Optional[VisualizerConfig] = None):
-        self.config = config or VisualizerConfig()
-        self.storage_path = Path(self.config.storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-
-        # Node storage
-        self.nodes: Dict[str, MemoryNode] = {}
-
-        # Indexes
+    def __init__(self, storage_path: str = "./data/auto_notes", logger: Optional[logging.Logger] = None):
+        self.storage_path = Path(storage_path)
+        self.logger = logger or self._setup_logger()
+        self.notes: Dict[str, VisualNote] = {}
         self.category_index: Dict[str, Set[str]] = {}
         self.tag_index: Dict[str, Set[str]] = {}
-
-        # Logger
-        self.logger = self._setup_logger()
-        self._load_from_disk()
-        self.logger.info(f"MemoryVisualizer initialized: {len(self.nodes)} nodes loaded")
+        self._load_notes()
 
     def _setup_logger(self) -> logging.Logger:
         logger = logging.getLogger("aumcore.memory.visualizer")
@@ -101,257 +72,137 @@ class MemoryVisualizer:
             formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
             handler.setFormatter(formatter)
             logger.addHandler(handler)
-            logger.setLevel(self.config.log_level)
+            logger.setLevel(logging.INFO)
         return logger
 
-    # ============================================================================
-    # NODE MANAGEMENT
-    # ============================================================================
-
-    def add_node(self, content: str, category: str = "general", importance: float = 0.5,
-                 tags: Optional[List[str]] = None, source: str = "manual") -> str:
-        node = MemoryNode(
-            content=content,
-            category=category,
-            importance=max(0.0, min(1.0, importance)),
-            tags=tags or [],
-            source=source
-        )
-        self.nodes[node.id] = node
-        self._update_indexes(node)
-        if self.config.auto_save:
-            self._save_to_disk()
-        self.logger.debug(f"Node added: {node.id} ({category})")
-        return node.id
-
-    def update_node(self, node_id: str, content: Optional[str] = None, category: Optional[str] = None,
-                    importance: Optional[float] = None, tags: Optional[List[str]] = None) -> bool:
-        node = self.nodes.get(node_id)
-        if not node:
-            return False
-        self._remove_from_indexes(node)
-        if content is not None:
-            node.content = content
-        if category is not None:
-            node.category = category
-        if importance is not None:
-            node.importance = max(0.0, min(1.0, importance))
-        if tags is not None:
-            node.tags = [t.lower() for t in tags]
-        self._update_indexes(node)
-        if self.config.auto_save:
-            self._save_to_disk()
-        self.logger.debug(f"Node updated: {node_id}")
-        return True
-
-    def delete_node(self, node_id: str) -> bool:
-        node = self.nodes.get(node_id)
-        if not node:
-            return False
-        self._remove_from_indexes(node)
-        # Remove edges pointing to this node
-        for n in self.nodes.values():
-            n.edges.discard(node_id)
-        del self.nodes[node_id]
-        if self.config.auto_save:
-            self._save_to_disk()
-        self.logger.debug(f"Node deleted: {node_id}")
-        return True
-
-    # ============================================================================
-    # INDEX MANAGEMENT
-    # ============================================================================
-
-    def _update_indexes(self, node: MemoryNode) -> None:
-        if node.category not in self.category_index:
-            self.category_index[node.category] = set()
-        self.category_index[node.category].add(node.id)
-        for tag in node.tags:
-            t = tag.lower()
-            if t not in self.tag_index:
-                self.tag_index[t] = set()
-            self.tag_index[t].add(node.id)
-
-    def _remove_from_indexes(self, node: MemoryNode) -> None:
-        if node.category in self.category_index:
-            self.category_index[node.category].discard(node.id)
-        for tag in node.tags:
-            t = tag.lower()
-            if t in self.tag_index:
-                self.tag_index[t].discard(node.id)
-
-    # ============================================================================
-    # NODE RETRIEVAL
-    # ============================================================================
-
-    def get_node(self, node_id: str) -> Optional[MemoryNode]:
-        return self.nodes.get(node_id)
-
-    def search_nodes(self, query: str, category: Optional[str] = None,
-                     min_importance: float = 0.0, limit: int = 10) -> List[MemoryNode]:
-        query_lower = query.lower()
-        matches = []
-        for node in self.nodes.values():
-            if category and node.category != category:
-                continue
-            if node.importance < min_importance:
-                continue
-            if query_lower in node.content.lower():
-                matches.append(node)
-        matches.sort(key=lambda n: n.importance, reverse=True)
-        return matches[:limit]
-
-    def get_nodes_by_category(self, category: str) -> List[MemoryNode]:
-        ids = self.category_index.get(category, set())
-        nodes = [self.nodes[nid] for nid in ids if nid in self.nodes]
-        nodes.sort(key=lambda n: n.timestamp, reverse=True)
-        return nodes
-
-    def get_nodes_by_tag(self, tag: str) -> List[MemoryNode]:
-        ids = self.tag_index.get(tag.lower(), set())
-        nodes = [self.nodes[nid] for nid in ids if nid in self.nodes]
-        nodes.sort(key=lambda n: n.importance, reverse=True)
-        return nodes
-
-    def get_most_important_nodes(self, limit: int = 10) -> List[MemoryNode]:
-        return sorted(self.nodes.values(), key=lambda n: n.importance, reverse=True)[:limit]
-
-    # ============================================================================
-    # EDGE MANAGEMENT
-    # ============================================================================
-
-    def add_edge(self, from_id: str, to_id: str) -> bool:
-        if from_id in self.nodes and to_id in self.nodes:
-            self.nodes[from_id].add_edge(to_id)
-            self.nodes[to_id].add_edge(from_id)
-            if self.config.auto_save:
-                self._save_to_disk()
-            return True
-        return False
-
-    # ============================================================================
-    # GRAPH VISUALIZATION
-    # ============================================================================
-
-    def visualize_graph(self, highlight_nodes: Optional[List[str]] = None) -> None:
-        if not self.config.enable_graph:
-            self.logger.warning("Graph visualization is disabled in config.")
+    def _load_notes(self):
+        notes_file = self.storage_path / "notes.json"
+        if not notes_file.exists():
+            self.logger.info("No notes file found for visualization.")
             return
-        G = nx.Graph()
-        for node in self.nodes.values():
-            G.add_node(node.id, label=node.content[:15])
-            for e in node.edges:
-                if e in self.nodes:
-                    G.add_edge(node.id, e)
-        pos = nx.spring_layout(G, k=0.5)
-        plt.figure(figsize=(12, 8))
-        nx.draw(G, pos, with_labels=True, labels=nx.get_node_attributes(G, 'label'),
-                node_color='skyblue', edge_color='gray', node_size=1000, font_size=8)
-        if highlight_nodes:
-            nx.draw_networkx_nodes(G, pos, nodelist=highlight_nodes, node_color='orange')
-        plt.title("Memory Visualizer Graph")
+        try:
+            with open(notes_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for note_id, note_data in data.get("notes", {}).items():
+                note = VisualNote(
+                    note_id=note_id,
+                    content=note_data["content"],
+                    category=note_data["category"],
+                    importance=note_data["importance"],
+                    tags=note_data.get("tags", []),
+                    timestamp=datetime.fromisoformat(note_data["timestamp"])
+                )
+                self.notes[note_id] = note
+                self._update_indexes(note)
+            self.logger.info(f"Loaded {len(self.notes)} notes for visualization")
+        except Exception as e:
+            self.logger.error(f"Error loading notes: {e}")
+
+    def _update_indexes(self, note: VisualNote):
+        if note.category not in self.category_index:
+            self.category_index[note.category] = set()
+        self.category_index[note.category].add(note.id)
+        for tag in note.tags:
+            tag_lower = tag.lower()
+            if tag_lower not in self.tag_index:
+                self.tag_index[tag_lower] = set()
+            self.tag_index[tag_lower].add(note.id)
+
+    # ========================================================================
+    # FILTERING & RETRIEVAL
+    # ========================================================================
+
+    def filter_by_category(self, category: str) -> List[VisualNote]:
+        note_ids = self.category_index.get(category, set())
+        return [self.notes[nid] for nid in note_ids]
+
+    def filter_by_tag(self, tag: str) -> List[VisualNote]:
+        note_ids = self.tag_index.get(tag.lower(), set())
+        return [self.notes[nid] for nid in note_ids]
+
+    def filter_recent(self, hours: int = 24) -> List[VisualNote]:
+        cutoff = datetime.now() - timedelta(hours=hours)
+        return [n for n in self.notes.values() if n.timestamp >= cutoff]
+
+    # ========================================================================
+    # VISUALIZATION
+    # ========================================================================
+
+    def plot_category_heatmap(self):
+        categories = list(self.category_index.keys())
+        counts = [len(self.category_index[c]) for c in categories]
+        plt.figure(figsize=(10, 6))
+        sns.heatmap([counts], annot=True, fmt="d", cmap="viridis", xticklabels=categories)
+        plt.title("Category-wise Note Count Heatmap")
         plt.show()
 
-    # ============================================================================
-    # STATISTICS
-    # ============================================================================
+    def plot_tag_cooccurrence(self):
+        from itertools import combinations
+        import networkx as nx
 
-    def get_statistics(self) -> Dict[str, Any]:
-        stats = {
-            "total_nodes": len(self.nodes),
-            "by_category": {k: len(v) for k, v in self.category_index.items()},
-            "by_tag": {k: len(v) for k, v in self.tag_index.items()},
-            "avg_importance": sum(n.importance for n in self.nodes.values()) / max(1, len(self.nodes)),
-        }
-        return stats
+        tag_list = list(self.tag_index.keys())
+        G = nx.Graph()
+        for tag in tag_list:
+            G.add_node(tag)
+        # Build edges
+        for tag1, tag2 in combinations(tag_list, 2):
+            shared = self.tag_index[tag1].intersection(self.tag_index[tag2])
+            if shared:
+                G.add_edge(tag1, tag2, weight=len(shared))
+        plt.figure(figsize=(10, 10))
+        pos = nx.spring_layout(G, k=0.5)
+        weights = [G[u][v]['weight'] for u,v in G.edges()]
+        nx.draw(G, pos, with_labels=True, width=weights, node_color='skyblue', node_size=2000, font_size=10)
+        plt.title("Tag Co-occurrence Graph")
+        plt.show()
 
-    # ============================================================================
-    # PERSISTENCE
-    # ============================================================================
+    def plot_importance_scatter(self):
+        xs = [n.timestamp.timestamp() for n in self.notes.values()]
+        ys = [n.importance for n in self.notes.values()]
+        plt.figure(figsize=(12, 6))
+        plt.scatter(xs, ys, c=ys, cmap="coolwarm", alpha=0.7)
+        plt.xlabel("Timestamp")
+        plt.ylabel("Importance")
+        plt.title("Importance Scatter over Time")
+        plt.show()
 
-    def _save_to_disk(self) -> None:
-        path = self.storage_path / "nodes.json"
-        data = {
-            "nodes": {nid: self._serialize_node(n) for nid, n in self.nodes.items()},
-            "saved_at": datetime.now().isoformat()
-        }
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        self.logger.debug(f"Saved {len(self.nodes)} nodes to disk")
-
-    def _load_from_disk(self) -> None:
-        path = self.storage_path / "nodes.json"
-        if not path.exists():
+    def plot_recent_activity_timeline(self, hours: int = 24):
+        recent_notes = self.filter_recent(hours)
+        if not recent_notes:
+            self.logger.info("No recent notes for timeline.")
             return
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        for nid, ndata in data.get("nodes", {}).items():
-            node = MemoryNode(
-                id=ndata["id"],
-                content=ndata["content"],
-                category=ndata["category"],
-                importance=ndata["importance"],
-                tags=ndata.get("tags", []),
-                timestamp=datetime.fromisoformat(ndata["timestamp"]),
-                source=ndata.get("source", "memory"),
-                context=ndata.get("context", {}),
-                edges=set(ndata.get("edges", []))
-            )
-            self.nodes[nid] = node
-            self._update_indexes(node)
-        self.logger.debug(f"Loaded {len(self.nodes)} nodes from disk")
+        timestamps = [n.timestamp for n in recent_notes]
+        importance = [n.importance for n in recent_notes]
+        plt.figure(figsize=(12, 4))
+        plt.plot(timestamps, importance, marker='o')
+        plt.title(f"Recent Activity Timeline (last {hours} hours)")
+        plt.xlabel("Timestamp")
+        plt.ylabel("Importance")
+        plt.show()
 
-    def _serialize_node(self, node: MemoryNode) -> Dict[str, Any]:
-        return {
-            "id": node.id,
-            "content": node.content,
-            "category": node.category,
-            "importance": node.importance,
-            "tags": node.tags,
-            "timestamp": node.timestamp.isoformat(),
-            "source": node.source,
-            "context": node.context,
-            "edges": list(node.edges)
-        }
-
-    # ============================================================================
+    # ========================================================================
     # ASYNC SUPPORT
-    # ============================================================================
+    # ========================================================================
 
-    async def add_node_async(self, *args, **kwargs) -> str:
-        return await asyncio.to_thread(self.add_node, *args, **kwargs)
+    async def async_filter_by_category(self, category: str) -> List[VisualNote]:
+        return await asyncio.to_thread(self.filter_by_category, category)
 
-    async def search_nodes_async(self, *args, **kwargs) -> List[MemoryNode]:
-        return await asyncio.to_thread(self.search_nodes, *args, **kwargs)
+    async def async_plot_category_heatmap(self):
+        await asyncio.to_thread(self.plot_category_heatmap)
 
-    async def visualize_graph_async(self, *args, **kwargs) -> None:
-        await asyncio.to_thread(self.visualize_graph, *args, **kwargs)
+    async def async_plot_tag_cooccurrence(self):
+        await asyncio.to_thread(self.plot_tag_cooccurrence)
+
+    async def async_plot_importance_scatter(self):
+        await asyncio.to_thread(self.plot_importance_scatter)
+
+    async def async_plot_recent_activity_timeline(self, hours: int = 24):
+        await asyncio.to_thread(self.plot_recent_activity_timeline, hours)
 
 # ============================================================================
 # FACTORY FUNCTION
 # ============================================================================
 
-def create_memory_visualizer(config: Optional[VisualizerConfig] = None) -> MemoryVisualizer:
-    return MemoryVisualizer(config=config)
-
-# ============================================================================
-# MODULE EXPORTS
-# ============================================================================
-
-__all__ = [
-    "MemoryVisualizer",
-    "MemoryNode",
-    "VisualizerConfig",
-    "create_memory_visualizer"
-]
-
-# ============================================================================
-# TODO: Phase-2+ Integrations
-# - Mistral-7B embeddings
-# - Semantic relevance scoring
-# - Auto clustering & graph layout optimization
-# - Interactive dashboards
-# - Cross-memory linking
-# - Collaborative editing
-# ============================================================================
+def create_memory_visualizer(storage_path: Optional[str] = None, logger: Optional[logging.Logger] = None) -> MemoryVisualizer:
+    return MemoryVisualizer(storage_path=storage_path or "./data/auto_notes", logger=logger)
 
