@@ -1,998 +1,605 @@
 """
-Knowledge Graph Module for AumCore_AI
+AumCore_AI Memory Subsystem - Knowledge Graph Module
+Phase 1 Only (Chunk 1 + Chunk 2)
 
-This module manages entity relationships, facts, and connections in a graph structure.
-Enables semantic linking and knowledge representation.
+File: memory/knowledge_graph.py
 
-Phase-1: Rule-based graph with simple entity extraction.
-Future: Integration with Mistral-7B for entity recognition and relation extraction.
+Description:
+    यह module Phase‑1 में एक simple, in-memory, rule-based
+    Knowledge Graph देता है।
 
-File: core/memory/knowledge_graph.py
+    Core Idea (Phase‑1):
+        - Nodes (entities, concepts) और edges (relations) को
+          deterministic तरीके से manage करना।
+        - कोई graph database, model-based reasoning, या advanced traversal नहीं।
+        - Clean, testable, explainable behavior।
+
+    Future (Phase‑3+):
+        - Semantic relation detection via models
+        - Graph-based reasoning
+        - Cross‑module integration (notes, user profile, etc.)
 """
 
-import asyncio
-import json
+# ============================================================
+# ✅ Chunk 1: Imports (PEP8)
+# ============================================================
+
 import logging
-from collections import defaultdict
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
-from uuid import uuid4
-
-# Type annotations
-from typing import TypedDict
 
 
-# ============================================================================
-# CONFIGURATION & TYPES
-# ============================================================================
+# ============================================================
+# ✅ Chunk 1: Local Logger Setup
+# ============================================================
 
-class GraphConfig(TypedDict):
-    """Configuration for knowledge graph."""
-    storage_path: str
-    max_nodes: int
-    max_edges: int
-    enable_auto_linking: bool
+def get_kg_logger(name: str = "AumCoreAI.Memory.KnowledgeGraph") -> logging.Logger:
+    """
+    Knowledge graph module के लिए simple logger।
+    """
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] [KNOWLEDGE_GRAPH] [%(levelname)s] %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
 
 
-class NodeDict(TypedDict):
-    """Type definition for a graph node."""
+logger = get_kg_logger()
+
+
+# ============================================================
+# ✅ Chunk 2: Basic Data Structures (Rule-Based)
+# ============================================================
+
+@dataclass
+class KGNode:
+    """
+    Knowledge graph node (Phase‑1 simple version)।
+
+    Fields:
+        id: unique node identifier (string)
+        label: human-readable label
+        type: node type/category (e.g., "concept", "person", "topic")
+        properties: अतिरिक्त key-value metadata
+    """
+
     id: str
     label: str
-    node_type: str
-    properties: Dict[str, Any]
-    created_at: datetime
+    type: str = "concept"
+    properties: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("KGNode.id non-empty string होना चाहिए।")
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("KGNode.label non-empty string होना चाहिए।")
+        if not isinstance(self.type, str) or not self.type.strip():
+            raise ValueError("KGNode.type non-empty string होना चाहिए।")
 
 
-class EdgeDict(TypedDict):
-    """Type definition for a graph edge."""
+@dataclass
+class KGEdge:
+    """
+    Knowledge graph edge (Phase‑1 simple version)।
+
+    Fields:
+        id: edge identifier
+        source: source node id
+        target: target node id
+        relation: relation type (e.g., "likes", "uses", "depends_on")
+        properties: अतिरिक्त metadata
+    """
+
     id: str
-    source_id: str
-    target_id: str
-    relation_type: str
-    weight: float
-    properties: Dict[str, Any]
-
-
-# ============================================================================
-# DATA MODELS
-# ============================================================================
-
-@dataclass
-class GraphNode:
-    """Represents a node (entity) in the knowledge graph."""
-    
-    id: str = field(default_factory=lambda: str(uuid4()))
-    label: str = ""
-    node_type: str = "entity"
+    source: str
+    target: str
+    relation: str
     properties: Dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.now)
-    updated_at: datetime = field(default_factory=datetime.now)
-    
+
     def __post_init__(self) -> None:
-        """Validate node after initialization."""
-        if not self.label:
-            raise ValueError("Node label cannot be empty")
-        if not self.node_type:
-            raise ValueError("Node type cannot be empty")
-    
-    def to_dict(self) -> NodeDict:
-        """Convert to dictionary format."""
-        return {
-            "id": self.id,
-            "label": self.label,
-            "node_type": self.node_type,
-            "properties": self.properties,
-            "created_at": self.created_at
-        }
-    
-    def update_property(self, key: str, value: Any) -> None:
-        """Update node property."""
-        self.properties[key] = value
-        self.updated_at = datetime.now()
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("KGEdge.id non-empty string होना चाहिए।")
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ValueError("KGEdge.source non-empty string होना चाहिए।")
+        if not isinstance(self.target, str) or not self.target.strip():
+            raise ValueError("KGEdge.target non-empty string होना चाहिए।")
+        if not isinstance(self.relation, str) or not self.relation.strip():
+            raise ValueError("KGEdge.relation non-empty string होना चाहिए।")
 
 
 @dataclass
-class GraphEdge:
-    """Represents an edge (relationship) in the knowledge graph."""
-    
-    id: str = field(default_factory=lambda: str(uuid4()))
-    source_id: str = ""
-    target_id: str = ""
-    relation_type: str = "related_to"
-    weight: float = 1.0
-    properties: Dict[str, Any] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=datetime.now)
-    
+class KGConfig:
+    """
+    Knowledge graph के लिए Phase‑1 configuration।
+    """
+
+    max_nodes: int = 10_000
+    max_edges: int = 50_000
+    allow_self_loops: bool = False
+    allow_parallel_edges: bool = True
+
     def __post_init__(self) -> None:
-        """Validate edge after initialization."""
-        if not self.source_id or not self.target_id:
-            raise ValueError("Source and target IDs cannot be empty")
-        if not self.relation_type:
-            raise ValueError("Relation type cannot be empty")
-        if not 0.0 <= self.weight <= 1.0:
-            raise ValueError("Weight must be between 0.0 and 1.0")
-    
-    def to_dict(self) -> EdgeDict:
-        """Convert to dictionary format."""
-        return {
-            "id": self.id,
-            "source_id": self.source_id,
-            "target_id": self.target_id,
-            "relation_type": self.relation_type,
-            "weight": self.weight,
-            "properties": self.properties
-        }
+        if self.max_nodes <= 0:
+            raise ValueError("max_nodes positive होना चाहिए।")
+        if self.max_edges <= 0:
+            raise ValueError("max_edges positive होना चाहिए।")
 
 
-# ============================================================================
-# CORE KNOWLEDGE GRAPH CLASS
-# ============================================================================
+# ============================================================
+# ✅ Chunk 2: Sanitization Helpers
+# ============================================================
+
+def _sanitize_id(value: str) -> str:
+    """
+    IDs के लिए simple sanitization।
+    """
+    if value is None:
+        raise ValueError("ID None नहीं हो सकता।")
+    s = str(value).strip()
+    if not s:
+        raise ValueError("ID empty नहीं होना चाहिए।")
+    return s
+
+
+def _sanitize_label(value: str) -> str:
+    """
+    Labels के लिए simple sanitization।
+    """
+    if value is None:
+        raise ValueError("Label None नहीं हो सकता।")
+    s = str(value).strip()
+    if not s:
+        raise ValueError("Label empty नहीं होना चाहिए।")
+    return s
+
+
+def _sanitize_type(value: str, default: str = "concept") -> str:
+    """
+    Node/edge type sanitization।
+    """
+    if value is None:
+        return default
+    s = str(value).strip()
+    return s if s else default
+
+
+def _sanitize_relation(value: str) -> str:
+    """
+    Relation नाम sanitization।
+    """
+    if value is None:
+        raise ValueError("Relation None नहीं हो सकता।")
+    s = str(value).strip()
+    if not s:
+        raise ValueError("Relation empty नहीं होना चाहिए।")
+    return s
+
+
+# ============================================================
+# ✅ Core Class: KnowledgeGraph (Phase‑1 Implementation)
+# ============================================================
 
 class KnowledgeGraph:
     """
-    Graph-based knowledge representation system.
-    
+    Simple in-memory knowledge graph (Phase‑1)。
+
     Features:
-    - Node and edge management
-    - Relationship tracking
-    - Path finding between entities
-    - Subgraph extraction
-    - Persistent storage
-    - Auto-linking based on similarity
-    
-    Attributes:
-        config: Graph configuration
-        nodes: Dictionary of nodes by ID
-        edges: Dictionary of edges by ID
-        adjacency: Adjacency list for efficient traversal
-        logger: Centralized logger instance
-    
-    Example:
-        >>> graph = KnowledgeGraph()
-        >>> user_node = graph.add_node("User", "person")
-        >>> python_node = graph.add_node("Python", "language")
-        >>> graph.add_edge(user_node, python_node, "prefers")
+        - Nodes add/remove/update
+        - Edges add/remove/update
+        - Basic neighbor queries
+        - Simple path exploration (1–2 hops only if needed)
+        - No complex algorithms, no external DB
     """
-    
-    def __init__(
-        self,
-        storage_path: str = "./data/knowledge_graph",
-        max_nodes: int = 100000,
-        max_edges: int = 500000,
-        enable_auto_linking: bool = True,
-        logger: Optional[logging.Logger] = None
-    ) -> None:
-        """
-        Initialize knowledge graph.
-        
-        Args:
-            storage_path: Directory path for persistent storage
-            max_nodes: Maximum number of nodes
-            max_edges: Maximum number of edges
-            enable_auto_linking: Auto-create edges based on similarity
-            logger: Optional logger instance
-        
-        Raises:
-            ValueError: If parameters are invalid
-        """
-        # Validation
-        if max_nodes <= 0 or max_edges <= 0:
-            raise ValueError("Max nodes and edges must be positive")
-        
-        # Configuration
-        self.config: GraphConfig = {
-            "storage_path": storage_path,
-            "max_nodes": max_nodes,
-            "max_edges": max_edges,
-            "enable_auto_linking": enable_auto_linking
-        }
-        
-        # Storage
-        self.storage_path = Path(storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-        
-        # Graph data structures
-        self.nodes: Dict[str, GraphNode] = {}
-        self.edges: Dict[str, GraphEdge] = {}
-        
-        # Adjacency list: {node_id: {neighbor_id: edge_id}}
-        self.adjacency: Dict[str, Dict[str, str]] = defaultdict(dict)
-        
-        # Reverse index: {label.lower(): [node_ids]}
-        self.label_index: Dict[str, List[str]] = defaultdict(list)
-        
-        # Logging
-        self.logger = logger or self._setup_logger()
-        
-        # Load existing graph
-        self._load_from_disk()
-        
-        self.logger.info(
-            f"KnowledgeGraph initialized: nodes={len(self.nodes)}, "
-            f"edges={len(self.edges)}"
-        )
-    
-    def _setup_logger(self) -> logging.Logger:
-        """Setup centralized logger (Phase-1 fallback)."""
-        logger = logging.getLogger("aumcore.memory.knowledge_graph")
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
-        return logger
-    
-    # ========================================================================
-    # PUBLIC API - NODE OPERATIONS
-    # ========================================================================
-    
+
+    def __init__(self, config: Optional[KGConfig] = None) -> None:
+        self.config: KGConfig = config or KGConfig()
+
+        # Node and edge storage
+        self._nodes: Dict[str, KGNode] = {}
+        self._edges: Dict[str, KGEdge] = {}
+
+        # Adjacency: node_id -> set(edge_id)
+        self._outgoing_edges: Dict[str, Set[str]] = {}
+        self._incoming_edges: Dict[str, Set[str]] = {}
+
+        logger.debug("KnowledgeGraph initialized with config: %r", self.config)
+
+    # --------------------------------------------------------
+    # Public API: Node Management
+    # --------------------------------------------------------
+
     def add_node(
         self,
-        label: str,
-        node_type: str = "entity",
-        properties: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Add a node to the graph.
-        
-        Args:
-            label: Node label/name
-            node_type: Type of node (entity, concept, fact, etc.)
-            properties: Optional node properties
-        
-        Returns:
-            Node ID
-        
-        Raises:
-            ValueError: If max nodes exceeded
-        
-        Example:
-            >>> node_id = graph.add_node("Python", "language", {"version": "3.10"})
-        """
-        try:
-            # Check limits
-            if len(self.nodes) >= self.config["max_nodes"]:
-                self._prune_nodes()
-            
-            # Create node
-            node = GraphNode(
-                label=label,
-                node_type=node_type,
-                properties=properties or {}
-            )
-            
-            self.nodes[node.id] = node
-            
-            # Update label index
-            self.label_index[label.lower()].append(node.id)
-            
-            # Auto-linking
-            if self.config["enable_auto_linking"]:
-                self._auto_link_node(node.id)
-            
-            self.logger.debug(f"Added node: {label} ({node_type})")
-            
-            return node.id
-        
-        except Exception as e:
-            self.logger.error(f"Error adding node: {e}")
-            raise
-    
-    def get_node(self, node_id: str) -> Optional[GraphNode]:
-        """
-        Retrieve a node by ID.
-        
-        Args:
-            node_id: Node ID
-        
-        Returns:
-            GraphNode if found, None otherwise
-        
-        Example:
-            >>> node = graph.get_node(node_id)
-        """
-        return self.nodes.get(node_id)
-    
-    def find_nodes_by_label(self, label: str) -> List[GraphNode]:
-        """
-        Find nodes by label.
-        
-        Args:
-            label: Node label to search
-        
-        Returns:
-            List of matching nodes
-        
-        Example:
-            >>> nodes = graph.find_nodes_by_label("Python")
-        """
-        node_ids = self.label_index.get(label.lower(), [])
-        return [self.nodes[nid] for nid in node_ids if nid in self.nodes]
-    
-    def find_nodes_by_type(self, node_type: str) -> List[GraphNode]:
-        """
-        Find all nodes of specific type.
-        
-        Args:
-            node_type: Node type to filter
-        
-        Returns:
-            List of nodes with matching type
-        
-        Example:
-            >>> languages = graph.find_nodes_by_type("language")
-        """
-        return [
-            node for node in self.nodes.values()
-            if node.node_type == node_type
-        ]
-    
-    def update_node(
-        self,
         node_id: str,
-        properties: Dict[str, Any]
-    ) -> bool:
+        label: str,
+        type: str = "concept",
+        properties: Optional[Dict[str, Any]] = None,
+        overwrite: bool = False,
+    ) -> KGNode:
         """
-        Update node properties.
-        
-        Args:
-            node_id: Node ID to update
-            properties: Properties to update
-        
-        Returns:
-            True if updated, False if not found
-        
-        Example:
-            >>> graph.update_node(node_id, {"importance": 0.9})
+        नया node add करता है (या overwrite अगर allowed हो)।
         """
-        node = self.nodes.get(node_id)
-        if not node:
+        node_id = _sanitize_id(node_id)
+        label = _sanitize_label(label)
+        type = _sanitize_type(type)
+
+        if not overwrite and node_id in self._nodes:
+            raise ValueError(f"Node {node_id!r} already exists (overwrite=False).")
+
+        if node_id not in self._nodes and len(self._nodes) >= self.config.max_nodes:
+            raise ValueError("Max nodes limit reached, नया node add नहीं कर सकते।")
+
+        node = KGNode(
+            id=node_id,
+            label=label,
+            type=type,
+            properties=dict(properties or {}),
+        )
+        self._nodes[node_id] = node
+
+        # ensure adjacency structures
+        self._outgoing_edges.setdefault(node_id, set())
+        self._incoming_edges.setdefault(node_id, set())
+
+        logger.debug("Node added/updated: %s (%s)", node_id, type)
+        return node
+
+    def get_node(self, node_id: str) -> Optional[KGNode]:
+        """
+        Node ID से node return करता है (या None अगर ना मिले)।
+        """
+        return self._nodes.get(node_id)
+
+    def remove_node(self, node_id: str) -> bool:
+        """
+        Node और उससे जुड़े सभी edges remove करता है।
+        """
+        if node_id not in self._nodes:
             return False
-        
-        for key, value in properties.items():
-            node.update_property(key, value)
-        
-        self.logger.debug(f"Updated node: {node_id}")
+
+        # Collect all related edges
+        out_edges = self._outgoing_edges.get(node_id, set()).copy()
+        in_edges = self._incoming_edges.get(node_id, set()).copy()
+
+        for edge_id in out_edges.union(in_edges):
+            self.remove_edge(edge_id)
+
+        # अब node हटाओ
+        del self._nodes[node_id]
+        self._outgoing_edges.pop(node_id, None)
+        self._incoming_edges.pop(node_id, None)
+
+        logger.debug("Node removed: %s (edges removed: %d)", node_id, len(out_edges) + len(in_edges))
         return True
-    
-    def delete_node(self, node_id: str) -> bool:
+
+    def list_nodes(self) -> List[KGNode]:
         """
-        Delete a node and all connected edges.
-        
-        Args:
-            node_id: Node ID to delete
-        
-        Returns:
-            True if deleted, False if not found
-        
-        Example:
-            >>> graph.delete_node(node_id)
+        सारे nodes की list (id के हिसाब से sorted).
         """
-        if node_id not in self.nodes:
-            return False
-        
-        # Remove from label index
-        node = self.nodes[node_id]
-        if node.label.lower() in self.label_index:
-            self.label_index[node.label.lower()].remove(node_id)
-        
-        # Delete connected edges
-        edges_to_delete = []
-        for edge_id, edge in self.edges.items():
-            if edge.source_id == node_id or edge.target_id == node_id:
-                edges_to_delete.append(edge_id)
-        
-        for edge_id in edges_to_delete:
-            self.delete_edge(edge_id)
-        
-        # Delete node
-        del self.nodes[node_id]
-        if node_id in self.adjacency:
-            del self.adjacency[node_id]
-        
-        self.logger.debug(f"Deleted node: {node_id}")
-        return True
-    
-    # ========================================================================
-    # PUBLIC API - EDGE OPERATIONS
-    # ========================================================================
-    
+        nodes = list(self._nodes.values())
+        nodes.sort(key=lambda n: n.id)
+        return nodes
+
+    # --------------------------------------------------------
+    # Public API: Edge Management
+    # --------------------------------------------------------
+
     def add_edge(
         self,
-        source_id: str,
-        target_id: str,
-        relation_type: str = "related_to",
-        weight: float = 1.0,
-        properties: Optional[Dict[str, Any]] = None
-    ) -> str:
+        edge_id: str,
+        source: str,
+        target: str,
+        relation: str,
+        properties: Optional[Dict[str, Any]] = None,
+        overwrite: bool = False,
+    ) -> KGEdge:
         """
-        Add an edge between two nodes.
-        
-        Args:
-            source_id: Source node ID
-            target_id: Target node ID
-            relation_type: Type of relationship
-            weight: Edge weight (0.0-1.0)
-            properties: Optional edge properties
-        
-        Returns:
-            Edge ID
-        
-        Raises:
-            ValueError: If nodes don't exist or max edges exceeded
-        
-        Example:
-            >>> edge_id = graph.add_edge(user_id, python_id, "prefers", 0.9)
+        Edge add करता है (या overwrite अनुमति हो तो update करता है)।
         """
-        try:
-            # Validate nodes exist
-            if source_id not in self.nodes or target_id not in self.nodes:
-                raise ValueError("Source or target node does not exist")
-            
-            # Check limits
-            if len(self.edges) >= self.config["max_edges"]:
-                self._prune_edges()
-            
-            # Create edge
-            edge = GraphEdge(
-                source_id=source_id,
-                target_id=target_id,
-                relation_type=relation_type,
-                weight=weight,
-                properties=properties or {}
-            )
-            
-            self.edges[edge.id] = edge
-            
-            # Update adjacency list
-            self.adjacency[source_id][target_id] = edge.id
-            
-            self.logger.debug(
-                f"Added edge: {source_id} --[{relation_type}]--> {target_id}"
-            )
-            
-            return edge.id
-        
-        except Exception as e:
-            self.logger.error(f"Error adding edge: {e}")
-            raise
-    
-    def get_edge(self, edge_id: str) -> Optional[GraphEdge]:
+        edge_id = _sanitize_id(edge_id)
+        source = _sanitize_id(source)
+        target = _sanitize_id(target)
+        relation = _sanitize_relation(relation)
+
+        if source == target and not self.config.allow_self_loops:
+            raise ValueError("Self-loop edges allow_self_loops=False होने पर allowed नहीं।")
+
+        if source not in self._nodes:
+            raise ValueError(f"Source node {source!r} मौजूद नहीं है।")
+        if target not in self._nodes:
+            raise ValueError(f"Target node {target!r} मौजूद नहीं है।")
+
+        if not overwrite and edge_id in self._edges:
+            raise ValueError(f"Edge {edge_id!r} already exists (overwrite=False).")
+
+        if edge_id not in self._edges and len(self._edges) >= self.config.max_edges:
+            raise ValueError("Max edges limit reached, नया edge add नहीं कर सकते।")
+
+        # अगर parallel edges allow नहीं हैं तो check करें
+        if not self.config.allow_parallel_edges:
+            for eid in self._outgoing_edges.get(source, set()):
+                existing = self._edges[eid]
+                if existing.target == target and existing.relation == relation:
+                    raise ValueError(
+                        f"Parallel edge मौजूद है source={source!r}, "
+                        f"target={target!r}, relation={relation!r}."
+                    )
+
+        edge = KGEdge(
+            id=edge_id,
+            source=source,
+            target=target,
+            relation=relation,
+            properties=dict(properties or {}),
+        )
+        self._edges[edge_id] = edge
+
+        # adjacency update
+        self._outgoing_edges.setdefault(source, set()).add(edge_id)
+        self._incoming_edges.setdefault(target, set()).add(edge_id)
+
+        logger.debug(
+            "Edge added/updated: %s (%s -> %s, relation=%s)",
+            edge_id,
+            source,
+            target,
+            relation,
+        )
+        return edge
+
+    def get_edge(self, edge_id: str) -> Optional[KGEdge]:
         """
-        Retrieve an edge by ID.
-        
-        Args:
-            edge_id: Edge ID
-        
-        Returns:
-            GraphEdge if found, None otherwise
-        
-        Example:
-            >>> edge = graph.get_edge(edge_id)
+        Edge ID से edge return करता है।
         """
-        return self.edges.get(edge_id)
-    
-    def find_edges_between(
-        self,
-        source_id: str,
-        target_id: str
-    ) -> List[GraphEdge]:
+        return self._edges.get(edge_id)
+
+    def remove_edge(self, edge_id: str) -> bool:
         """
-        Find all edges between two nodes.
-        
-        Args:
-            source_id: Source node ID
-            target_id: Target node ID
-        
-        Returns:
-            List of edges
-        
-        Example:
-            >>> edges = graph.find_edges_between(node1_id, node2_id)
+        Edge remove करता है।
         """
-        edges = []
-        for edge in self.edges.values():
-            if edge.source_id == source_id and edge.target_id == target_id:
-                edges.append(edge)
+        edge = self._edges.get(edge_id)
+        if edge is None:
+            return False
+
+        # adjacency से हटाओ
+        if edge.source in self._outgoing_edges:
+            self._outgoing_edges[edge.source].discard(edge_id)
+        if edge.target in self._incoming_edges:
+            self._incoming_edges[edge.target].discard(edge_id)
+
+        del self._edges[edge_id]
+        logger.debug("Edge removed: %s", edge_id)
+        return True
+
+    def list_edges(self) -> List[KGEdge]:
+        """
+        सारे edges की list (id के हिसाब से sorted)।
+        """
+        edges = list(self._edges.values())
+        edges.sort(key=lambda e: e.id)
         return edges
-    
-    def get_node_edges(
+
+    # --------------------------------------------------------
+    # Public API: Basic Queries
+    # --------------------------------------------------------
+
+    def neighbors(
         self,
         node_id: str,
-        direction: str = "both"
-    ) -> List[GraphEdge]:
+        direction: str = "both",
+        relation: Optional[str] = None,
+    ) -> List[KGNode]:
         """
-        Get all edges connected to a node.
-        
+        दिए गए node के neighbors return करता है।
+
         Args:
-            node_id: Node ID
-            direction: Edge direction ("outgoing", "incoming", "both")
-        
-        Returns:
-            List of connected edges
-        
-        Example:
-            >>> edges = graph.get_node_edges(node_id, "outgoing")
+            node_id: reference node
+            direction:
+                - "out": source=node_id वाले edges
+                - "in": target=node_id वाले edges
+                - "both": दोनों तरह
+            relation: अगर दिया हो तो उसी relation वाले neighbors
         """
-        edges = []
-        
-        for edge in self.edges.values():
-            if direction in ["outgoing", "both"] and edge.source_id == node_id:
+        node_id = _sanitize_id(node_id)
+        if node_id not in self._nodes:
+            return []
+
+        neighbors_ids: Set[str] = set()
+
+        if direction in ("out", "both"):
+            for eid in self._outgoing_edges.get(node_id, set()):
+                edge = self._edges[eid]
+                if relation and edge.relation != relation:
+                    continue
+                neighbors_ids.add(edge.target)
+
+        if direction in ("in", "both"):
+            for eid in self._incoming_edges.get(node_id, set()):
+                edge = self._edges[eid]
+                if relation and edge.relation != relation:
+                    continue
+                neighbors_ids.add(edge.source)
+
+        results: List[KGNode] = []
+        for nid in neighbors_ids:
+            node = self._nodes.get(nid)
+            if node:
+                results.append(node)
+
+        results.sort(key=lambda n: n.id)
+        return results
+
+    def get_relations(
+        self,
+        node_a: str,
+        node_b: str,
+    ) -> List[KGEdge]:
+        """
+        Node A से node B के बीच direct relations (edges) return करता है।
+        """
+        node_a = _sanitize_id(node_a)
+        node_b = _sanitize_id(node_b)
+
+        if node_a not in self._nodes or node_b not in self._nodes:
+            return []
+
+        edges: List[KGEdge] = []
+        for eid in self._outgoing_edges.get(node_a, set()):
+            edge = self._edges[eid]
+            if edge.target == node_b:
                 edges.append(edge)
-            elif direction in ["incoming", "both"] and edge.target_id == node_id:
-                edges.append(edge)
-        
+
+        edges.sort(key=lambda e: e.id)
         return edges
-    
-    def delete_edge(self, edge_id: str) -> bool:
+
+    def node_exists(self, node_id: str) -> bool:
         """
-        Delete an edge.
-        
-        Args:
-            edge_id: Edge ID to delete
-        
-        Returns:
-            True if deleted, False if not found
-        
-        Example:
-            >>> graph.delete_edge(edge_id)
+        Node exist करता है या नहीं।
         """
-        edge = self.edges.get(edge_id)
-        if not edge:
-            return False
-        
-        # Remove from adjacency list
-        if edge.source_id in self.adjacency:
-            if edge.target_id in self.adjacency[edge.source_id]:
-                del self.adjacency[edge.source_id][edge.target_id]
-        
-        # Delete edge
-        del self.edges[edge_id]
-        
-        self.logger.debug(f"Deleted edge: {edge_id}")
-        return True
-    
-    # ========================================================================
-    # GRAPH TRAVERSAL & QUERIES
-    # ========================================================================
-    
-    def get_neighbors(self, node_id: str) -> List[GraphNode]:
+        return node_id in self._nodes
+
+    def edge_exists(self, edge_id: str) -> bool:
         """
-        Get all neighbor nodes.
-        
-        Args:
-            node_id: Node ID
-        
-        Returns:
-            List of neighbor nodes
-        
-        Example:
-            >>> neighbors = graph.get_neighbors(node_id)
+        Edge exist करता है या नहीं।
         """
-        neighbor_ids = self.adjacency.get(node_id, {}).keys()
-        return [self.nodes[nid] for nid in neighbor_ids if nid in self.nodes]
-    
-    def find_path(
+        return edge_id in self._edges
+
+    # --------------------------------------------------------
+    # Public API: Simple Path Exploration (1-2 hops)
+    # --------------------------------------------------------
+
+    def one_hop_paths(
         self,
-        start_id: str,
-        end_id: str,
-        max_depth: int = 5
-    ) -> Optional[List[str]]:
+        source: str,
+        relation: Optional[str] = None,
+    ) -> List[Tuple[KGNode, KGEdge]]:
         """
-        Find shortest path between two nodes (BFS).
-        
-        Args:
-            start_id: Starting node ID
-            end_id: Target node ID
-            max_depth: Maximum search depth
-        
-        Returns:
-            List of node IDs forming the path, or None if not found
-        
-        Example:
-            >>> path = graph.find_path(start_id, end_id)
+        Source से एक hop दूर neighbors + edges return करता है।
         """
-        if start_id not in self.nodes or end_id not in self.nodes:
-            return None
-        
-        if start_id == end_id:
-            return [start_id]
-        
-        # BFS
-        queue = [(start_id, [start_id])]
-        visited = {start_id}
-        
-        while queue:
-            current_id, path = queue.pop(0)
-            
-            if len(path) > max_depth:
+        source = _sanitize_id(source)
+        if source not in self._nodes:
+            return []
+
+        results: List[Tuple[KGNode, KGEdge]] = []
+        for eid in self._outgoing_edges.get(source, set()):
+            edge = self._edges[eid]
+            if relation and edge.relation != relation:
                 continue
-            
-            for neighbor_id in self.adjacency.get(current_id, {}):
-                if neighbor_id == end_id:
-                    return path + [neighbor_id]
-                
-                if neighbor_id not in visited:
-                    visited.add(neighbor_id)
-                    queue.append((neighbor_id, path + [neighbor_id]))
-        
-        return None
-    
-    def get_subgraph(
+            target_node = self._nodes.get(edge.target)
+            if target_node:
+                results.append((target_node, edge))
+
+        return results
+
+    def two_hop_targets(
         self,
-        center_id: str,
-        depth: int = 2
-    ) -> Tuple[List[GraphNode], List[GraphEdge]]:
+        source: str,
+        through_relation: Optional[str] = None,
+    ) -> List[KGNode]:
         """
-        Extract subgraph around a center node.
-        
-        Args:
-            center_id: Center node ID
-            depth: Traversal depth
-        
-        Returns:
-            Tuple of (nodes, edges) in subgraph
-        
-        Example:
-            >>> nodes, edges = graph.get_subgraph(node_id, depth=2)
+        Source से दो hop दूर वाले unique nodes return करता है।
         """
-        if center_id not in self.nodes:
-            return [], []
-        
-        # BFS to collect nodes
-        subgraph_nodes = {center_id}
-        queue = [(center_id, 0)]
-        visited = {center_id}
-        
-        while queue:
-            current_id, current_depth = queue.pop(0)
-            
-            if current_depth >= depth:
-                continue
-            
-            for neighbor_id in self.adjacency.get(current_id, {}):
-                if neighbor_id not in visited:
-                    visited.add(neighbor_id)
-                    subgraph_nodes.add(neighbor_id)
-                    queue.append((neighbor_id, current_depth + 1))
-        
-        # Collect edges within subgraph
-        subgraph_edges = []
-        for edge in self.edges.values():
-            if edge.source_id in subgraph_nodes and edge.target_id in subgraph_nodes:
-                subgraph_edges.append(edge)
-        
-        nodes = [self.nodes[nid] for nid in subgraph_nodes]
-        
-        return nodes, subgraph_edges
-    
-    # ========================================================================
-    # STATISTICS & ANALYSIS
-    # ========================================================================
-    
-    def get_statistics(self) -> Dict[str, Any]:
+        source = _sanitize_id(source)
+        if source not in self._nodes:
+            return []
+
+        first_hop: List[KGNode] = self.neighbors(
+            source,
+            direction="out",
+            relation=through_relation,
+        )
+
+        second_hop_ids: Set[str] = set()
+        for node in first_hop:
+            for neighbor in self.neighbors(node.id, direction="out"):
+                second_hop_ids.add(neighbor.id)
+
+        results: List[KGNode] = []
+        for nid in second_hop_ids:
+            node = self._nodes.get(nid)
+            if node:
+                results.append(node)
+
+        results.sort(key=lambda n: n.id)
+        return results
+
+    # --------------------------------------------------------
+    # Public API: Simple Introspection
+    # --------------------------------------------------------
+
+    def statistics(self) -> Dict[str, Any]:
         """
-        Get graph statistics.
-        
-        Returns:
-            Dictionary with graph statistics
-        
-        Example:
-            >>> stats = graph.get_statistics()
+        Graph की basic stats देता है।
         """
-        node_types = defaultdict(int)
-        for node in self.nodes.values():
-            node_types[node.node_type] += 1
-        
-        relation_types = defaultdict(int)
-        for edge in self.edges.values():
-            relation_types[edge.relation_type] += 1
-        
         return {
-            "total_nodes": len(self.nodes),
-            "total_edges": len(self.edges),
-            "node_types": dict(node_types),
-            "relation_types": dict(relation_types),
-            "avg_degree": len(self.edges) / len(self.nodes) if self.nodes else 0,
-            "config": self.config.copy()
+            "nodes": len(self._nodes),
+            "edges": len(self._edges),
+            "max_nodes": self.config.max_nodes,
+            "max_edges": self.config.max_edges,
         }
-    
-    # ========================================================================
-    # PERSISTENCE
-    # ========================================================================
-    
-    def save(self) -> None:
+
+    def debug_snapshot(self, limit: int = 20) -> Dict[str, Any]:
         """
-        Save graph to disk.
-        
-        Example:
-            >>> graph.save()
+        Debug के लिए छोटा snapshot (कुछ nodes/edges) देता है।
         """
-        self._save_to_disk()
-    
-    def clear(self) -> None:
-        """
-        Clear entire graph.
-        
-        Example:
-            >>> graph.clear()
-        """
-        self.nodes.clear()
-        self.edges.clear()
-        self.adjacency.clear()
-        self.label_index.clear()
-        
-        self.logger.info("Cleared knowledge graph")
-    
-    def _save_to_disk(self) -> None:
-        """Save graph to disk storage."""
-        try:
-            graph_file = self.storage_path / "graph.json"
-            
-            data = {
-                "nodes": {},
-                "edges": {},
-                "metadata": {
-                    "saved_at": datetime.now().isoformat(),
-                    "version": "1.0"
-                }
+        nodes_list = self.list_nodes()[: max(1, limit)]
+        edges_list = self.list_edges()[: max(1, limit)]
+
+        nodes_preview = [
+            {
+                "id": n.id,
+                "label": n.label,
+                "type": n.type,
+                "properties": dict(n.properties),
             }
-            
-            # Serialize nodes
-            for node_id, node in self.nodes.items():
-                data["nodes"][node_id] = {
-                    "id": node.id,
-                    "label": node.label,
-                    "node_type": node.node_type,
-                    "properties": node.properties,
-                    "created_at": node.created_at.isoformat(),
-                    "updated_at": node.updated_at.isoformat()
-                }
-            
-            # Serialize edges
-            for edge_id, edge in self.edges.items():
-                data["edges"][edge_id] = {
-                    "id": edge.id,
-                    "source_id": edge.source_id,
-                    "target_id": edge.target_id,
-                    "relation_type": edge.relation_type,
-                    "weight": edge.weight,
-                    "properties": edge.properties,
-                    "created_at": edge.created_at.isoformat()
-                }
-            
-            with open(graph_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            self.logger.debug(
-                f"Saved graph: {len(self.nodes)} nodes, {len(self.edges)} edges"
-            )
-        
-        except Exception as e:
-            self.logger.error(f"Error saving graph: {e}")
-    
-    def _load_from_disk(self) -> None:
-        """Load graph from disk storage."""
-        try:
-            graph_file = self.storage_path / "graph.json"
-            
-            if not graph_file.exists():
-                self.logger.info("No existing graph file found")
-                return
-            
-            with open(graph_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # Load nodes
-            for node_id, node_data in data.get("nodes", {}).items():
-                node = GraphNode(
-                    id=node_data["id"],
-                    label=node_data["label"],
-                    node_type=node_data["node_type"],
-                    properties=node_data.get("properties", {}),
-                    created_at=datetime.fromisoformat(node_data["created_at"]),
-                    updated_at=datetime.fromisoformat(node_data["updated_at"])
-                )
-                self.nodes[node_id] = node
-                self.label_index[node.label.lower()].append(node_id)
-            
-            # Load edges
-            for edge_id, edge_data in data.get("edges", {}).items():
-                edge = GraphEdge(
-                    id=edge_data["id"],
-                    source_id=edge_data["source_id"],
-                    target_id=edge_data["target_id"],
-                    relation_type=edge_data["relation_type"],
-                    weight=edge_data["weight"],
-                    properties=edge_data.get("properties", {}),
-                    created_at=datetime.fromisoformat(edge_data["created_at"])
-                )
-                self.edges[edge_id] = edge
-                self.adjacency[edge.source_id][edge.target_id] = edge_id
-            
-            self.logger.info(
-                f"Loaded graph: {len(self.nodes)} nodes, {len(self.edges)} edges"
-            )
-        
-        except Exception as e:
-            self.logger.error(f"Error loading graph: {e}")
-    
-    # ========================================================================
-    # INTERNAL HELPERS
-    # ========================================================================
-    
-    def _auto_link_node(self, node_id: str) -> None:
-        """
-        Auto-create edges based on label similarity (Phase-1: simple).
-        
-        Args:
-            node_id: Node to auto-link
-        """
-        node = self.nodes.get(node_id)
-        if not node:
-            return
-        
-        # Find similar nodes (same type, similar label)
-        for other_id, other_node in self.nodes.items():
-            if other_id == node_id:
-                continue
-            
-            if other_node.node_type == node.node_type:
-                similarity = self._calculate_label_similarity(
-                    node.label, other_node.label
-                )
-                
-                if similarity > 0.7:  # Threshold
-                    # Check if edge doesn't already exist
-                    if other_id not in self.adjacency.get(node_id, {}):
-                        self.add_edge(
-                            node_id, other_id, "similar_to", similarity
-                        )
-    
-    def _calculate_label_similarity(self, label1: str, label2: str) -> float:
-        """Calculate similarity between labels (Phase-1: simple)."""
-        tokens1 = set(label1.lower().split())
-        tokens2 = set(label2.lower().split())
-        
-        if not tokens1 or not tokens2:
-            return 0.0
-        
-        intersection = tokens1 & tokens2
-        union = tokens1 | tokens2
-        
-        return len(intersection) / len(union) if union else 0.0
-    
-    def _prune_nodes(self) -> None:
-        """Remove least connected nodes when limit reached."""
-        # Calculate node degrees
-        degrees = {nid: len(self.adjacency.get(nid, {})) for nid in self.nodes}
-        
-        # Sort by degree (ascending)
-        sorted_nodes = sorted(degrees.items(), key=lambda x: x[1])
-        
-        # Remove bottom 10%
-        remove_count = max(1, len(self.nodes) // 10)
-        
-        for node_id, _ in sorted_nodes[:remove_count]:
-            self.delete_node(node_id)
-        
-        self.logger.info(f"Pruned {remove_count} low-degree nodes")
-    
-    def _prune_edges(self) -> None:
-        """Remove lowest weight edges when limit reached."""
-        # Sort edges by weight
-        sorted_edges = sorted(
-            self.edges.items(),
-            key=lambda x: x[1].weight
-        )
-        
-        # Remove bottom 10%
-        remove_count = max(1, len(self.edges) // 10)
-        
-        for edge_id, _ in sorted_edges[:remove_count]:
-            self.delete_edge(edge_id)
-        
-        self.logger.info(f"Pruned {remove_count} low-weight edges")
-    
-    # ========================================================================
-    # ASYNC API (Future-ready)
-    # ========================================================================
-    
-    async def add_node_async(
-        self,
-        label: str,
-        node_type: str = "entity",
-        properties: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Async version of add_node."""
-        return await asyncio.to_thread(
-            self.add_node, label, node_type, properties
-        )
-    
-    async def find_path_async(
-        self,
-        start_id: str,
-        end_id: str,
-        max_depth: int = 5
-    ) -> Optional[List[str]]:
-        """Async version of find_path."""
-        return await asyncio.to_thread(
-            self.find_path, start_id, end_id, max_depth
-        )
+            for n in nodes_list
+        ]
 
+        edges_preview = [
+            {
+                "id": e.id,
+                "source": e.source,
+                "target": e.target,
+                "relation": e.relation,
+                "properties": dict(e.properties),
+            }
+            for e in edges_list
+        ]
 
-# ============================================================================
-# FACTORY PATTERN (Dependency Injection)
-# ============================================================================
-
-def create_knowledge_graph(
-    config: Optional[GraphConfig] = None,
-    logger: Optional[logging.Logger] = None
-) -> KnowledgeGraph:
-    """
-    Factory function to create KnowledgeGraph instance.
-    
-    Args:
-        config: Optional graph configuration
-        logger: Optional logger instance
-    
-    Returns:
-        Configured KnowledgeGraph instance
-    
-    Example:
-        >>> graph = create_knowledge_graph({"max_nodes": 50000})
-    """
-    if config is None:
-        config = {
-            "storage_path": "./data/knowledge_graph",
-            "max_nodes": 100000,
-            "max_edges": 500000,
-            "enable_auto_linking": True
+        return {
+            "statistics": self.statistics(),
+            "nodes_preview": nodes_preview,
+            "edges_preview": edges_preview,
         }
-    
-    return KnowledgeGraph(
-        storage_path=config["storage_path"],
-        max_nodes=config["max_nodes"],
-        max_edges=config["max_edges"],
-        enable_auto_linking=config["enable_auto_linking"],
-        logger=logger
-    )
 
 
-# ============================================================================
-# MODULE EXPORTS
-# ============================================================================
+# ============================================================
+# Public Factory Helper
+# ============================================================
+
+def create_default_knowledge_graph() -> KnowledgeGraph:
+    """
+    Default KGConfig के साथ simple knowledge graph instance देता है।
+    """
+    config = KGConfig()
+    return KnowledgeGraph(config=config)
+
+
+# ============================================================
+# Module Exports
+# ============================================================
 
 __all__ = [
+    "KGNode",
+    "KGEdge",
+    "KGConfig",
     "KnowledgeGraph",
-    "GraphNode",
-    "GraphEdge",
-    "NodeDict",
-    "EdgeDict",
-    "GraphConfig",
-    "create_knowledge_graph"
+    "create_default_knowledge_graph",
 ]
 
-
-# ============================================================================
-# TODO: FUTURE MODEL INTEGRATION (Phase-2+)
-# ============================================================================
-
-# TODO: Integrate Mistral-7B for:
-# - Named Entity Recognition (NER)
-# - Relation extraction from text
-# - Entity linking and disambiguation
-# - Automatic graph construction from documents
-
-# TODO: Add graph embedding (Node2Vec, GraphSAGE)
-
-# TODO: Implement community detection algorithms
-
-# TODO: Add temporal graph support (time-aware edges)
-
-# TODO: Implement graph visualization export (GraphML, DOT)
+# End of File: memory/knowledge_graph.py (Phase‑1, ~500 lines with comments)
