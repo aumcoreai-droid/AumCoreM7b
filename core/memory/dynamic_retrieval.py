@@ -1,780 +1,514 @@
 """
-Dynamic Retrieval Module for AumCore_AI
+AumCore_AI Memory Subsystem - Dynamic Retrieval Module
+Phase 1 Only (Chunk 1 + Chunk 2)
 
-This module implements intelligent memory retrieval based on context relevance,
-recency, and importance scoring. Provides adaptive search strategies.
+File: memory/dynamic_retrieval.py
 
-Phase-1: Rule-based retrieval with heuristic scoring.
-Future: Integration with Mistral-7B for semantic similarity matching.
+Description:
+    यह module Phase‑1 में पूरी तरह rule-based retrieval provide करता है।
+    कोई semantic search, embeddings, या model-based reranking नहीं है।
 
-File: core/memory/dynamic_retrieval.py
+    Core Idea (Phase‑1):
+        - इनपुट text queries से simple keyword, substring और scoring के हिसाब से
+          memory notes / items को retrieve करना।
+        - Deterministic, explainable scoring logic (pure Python, कोई external dependency नहीं)।
+
+    Future (Phase‑3+):
+        - Model-based semantic similarity
+        - Embedding indexes
+        - Hybrid lexical + vector retrieval
 """
 
-import asyncio
+# ============================================================
+# ✅ Chunk 1: Imports (PEP8)
+# ============================================================
+
 import logging
-import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
-
-# Type annotations
-from typing import TypedDict
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-# ============================================================================
-# CONFIGURATION & TYPES
-# ============================================================================
+# ============================================================
+# ✅ Chunk 1: Local Logger Setup
+# ============================================================
 
-class RetrievalConfig(TypedDict):
-    """Configuration for dynamic retrieval."""
-    max_results: int
-    recency_weight: float
-    importance_weight: float
-    relevance_weight: float
-    enable_context_boost: bool
-
-
-class ScoredResult(TypedDict):
-    """Type definition for a scored retrieval result."""
-    entry_id: str
-    content: str
-    score: float
-    relevance: float
-    recency: float
-    importance: float
-
-
-# ============================================================================
-# ABSTRACT INTERFACES (SOLID: Dependency Inversion)
-# ============================================================================
-
-class MemorySourceProtocol(Protocol):
-    """Protocol for memory sources."""
-    
-    def get_all_entries(self) -> List[Any]:
-        """Retrieve all memory entries."""
-        ...
-    
-    def get_entry(self, entry_id: str) -> Optional[Any]:
-        """Retrieve specific entry."""
-        ...
+def get_dynamic_retrieval_logger(
+    name: str = "AumCoreAI.Memory.DynamicRetrieval",
+) -> logging.Logger:
+    """
+    Dynamic retrieval module के लिए simple logger।
+    """
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] [DYNAMIC_RETRIEVAL] [%(levelname)s] %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
 
 
-class ScoringStrategyProtocol(Protocol):
-    """Protocol for scoring strategies."""
-    
-    def calculate_score(
-        self,
-        entry: Any,
-        query: str,
-        context: Dict[str, Any]
-    ) -> float:
-        """Calculate relevance score for entry."""
-        ...
+logger = get_dynamic_retrieval_logger()
 
 
-# ============================================================================
-# DATA MODELS
-# ============================================================================
+# ============================================================
+# ✅ Chunk 2: Basic Data Structures (Rule-Based)
+# ============================================================
 
 @dataclass
-class RetrievalContext:
-    """Context information for retrieval operations."""
-    
-    query: str
-    timestamp: datetime = field(default_factory=datetime.now)
-    user_preferences: Dict[str, Any] = field(default_factory=dict)
-    conversation_history: List[str] = field(default_factory=list)
-    active_topics: Set[str] = field(default_factory=set)
-    constraints: Dict[str, Any] = field(default_factory=dict)
-    
+class RetrievalItem:
+    """
+    Retrieval के लिए Phase‑1 compatible item।
+
+    Fields:
+        id: unique identifier (string)
+        text: searchable text content
+        metadata: optional metadata dict (category, source, tags etc.)
+        importance: 0.0–1.0 range में optional importance (अगर हो)
+    """
+
+    id: str
+    text: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    importance: float = 0.5
+
     def __post_init__(self) -> None:
-        """Validate context after initialization."""
-        if not self.query or not isinstance(self.query, str):
-            raise ValueError("Query must be a non-empty string")
+        if not isinstance(self.id, str) or not self.id:
+            raise ValueError("RetrievalItem.id non-empty string होना चाहिए।")
+        if not isinstance(self.text, str) or not self.text.strip():
+            raise ValueError("RetrievalItem.text non-empty string होना चाहिए।")
+        if not (0.0 <= self.importance <= 1.0):
+            raise ValueError("RetrievalItem.importance 0.0–1.0 के बीच होना चाहिए।")
 
 
 @dataclass
 class RetrievalResult:
-    """Represents a single retrieval result with scoring details."""
-    
-    entry_id: str
-    content: str
-    final_score: float
-    relevance_score: float
-    recency_score: float
-    importance_score: float
+    """
+    Retrieval result का representation।
+    """
+
+    item_id: str
+    score: float
+    text: str
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def to_dict(self) -> ScoredResult:
-        """Convert to dictionary format."""
-        return {
-            "entry_id": self.entry_id,
-            "content": self.content,
-            "score": self.final_score,
-            "relevance": self.relevance_score,
-            "recency": self.recency_score,
-            "importance": self.importance_score
-        }
+    match_explanation: str = ""
 
 
-# ============================================================================
-# SCORING STRATEGIES
-# ============================================================================
-
-class HeuristicScorer:
+@dataclass
+class RetrievalConfig:
     """
-    Phase-1 heuristic-based scoring strategy.
-    
-    Calculates relevance using:
-    - Keyword matching
-    - Term frequency
-    - Query overlap
+    Dynamic retrieval के लिए Phase‑1 configuration।
+    Pure rule-based knobs।
     """
-    
-    def __init__(self, logger: Optional[logging.Logger] = None) -> None:
-        """Initialize heuristic scorer."""
-        self.logger = logger or logging.getLogger(__name__)
-    
-    def calculate_relevance(self, content: str, query: str) -> float:
-        """
-        Calculate relevance score between content and query.
-        
-        Args:
-            content: Memory content
-            query: Search query
-        
-        Returns:
-            Relevance score (0.0 to 1.0)
-        """
-        if not content or not query:
-            return 0.0
-        
-        content_lower = content.lower()
-        query_lower = query.lower()
-        
-        # Exact match bonus
-        if query_lower in content_lower:
-            return 1.0
-        
-        # Tokenize query and content
-        query_tokens = self._tokenize(query_lower)
-        content_tokens = self._tokenize(content_lower)
-        
-        if not query_tokens or not content_tokens:
-            return 0.0
-        
-        # Calculate token overlap
-        matching_tokens = set(query_tokens) & set(content_tokens)
-        overlap_ratio = len(matching_tokens) / len(query_tokens)
-        
-        # Calculate term frequency score
-        tf_score = sum(
-            content_tokens.count(token) for token in matching_tokens
-        ) / len(content_tokens)
-        
-        # Combined score
-        relevance = (overlap_ratio * 0.7) + (tf_score * 0.3)
-        
-        return min(1.0, relevance)
-    
-    def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization (Phase-1)."""
-        # Remove punctuation and split
-        text = re.sub(r'[^\w\s]', ' ', text)
-        tokens = text.split()
-        
-        # Filter stopwords (basic list)
-        stopwords = {
-            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to',
-            'for', 'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are'
-        }
-        
-        return [t for t in tokens if t not in stopwords and len(t) > 2]
+
+    min_score: float = 0.1
+    max_results: int = 20
+    case_sensitive: bool = False
+    boost_importance: bool = True
+    length_penalty: bool = True
+    keyword_weight: float = 0.6
+    substring_weight: float = 0.4
+    max_query_length: int = 256
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.min_score <= 1.0):
+            raise ValueError("min_score 0.0–1.0 के बीच होना चाहिए।")
+        if self.max_results <= 0:
+            raise ValueError("max_results positive होना चाहिए।")
+        if self.max_query_length <= 0:
+            raise ValueError("max_query_length positive होना चाहिए।")
 
 
-# ============================================================================
-# CORE DYNAMIC RETRIEVAL CLASS
-# ============================================================================
+# ============================================================
+# ✅ Chunk 2: Sanitization + Validation Helpers
+# ============================================================
 
-class DynamicRetrieval:
+def _sanitize_query(query: str, max_len: int) -> str:
     """
-    Intelligent memory retrieval system with adaptive scoring.
-    
+    Query string sanitize करता है।
+    """
+    if query is None:
+        return ""
+    q = str(query).strip()
+    if len(q) > max_len:
+        q = q[:max_len].rstrip()
+    return q
+
+
+def _normalize_text(text: str, case_sensitive: bool) -> str:
+    """
+    Retrieval scoring के लिए text normalize करता है।
+    """
+    if not isinstance(text, str):
+        return ""
+    t = text.strip()
+    if not case_sensitive:
+        t = t.lower()
+    return t
+
+
+def _split_keywords(text: str) -> List[str]:
+    """
+    Simple keyword split (Phase‑1: whitespace-based)।
+    """
+    if not text:
+        return []
+    parts = text.split()
+    return [p for p in parts if p]
+
+
+# ============================================================
+# ✅ Core Class: DynamicRetrievalEngine (Phase‑1)
+# ============================================================
+
+class DynamicRetrievalEngine:
+    """
+    Rule-based retrieval engine, Phase‑1 safe version।
+
     Features:
-    - Multi-factor scoring (relevance, recency, importance)
-    - Configurable weight distribution
-    - Context-aware boosting
-    - Category filtering
-    - Diversity-aware ranking
-    
-    Attributes:
-        config: Retrieval configuration
-        scorer: Relevance scoring strategy
-        logger: Centralized logger instance
-    
-    Example:
-        >>> retriever = DynamicRetrieval()
-        >>> context = RetrievalContext(query="Python coding")
-        >>> results = retriever.retrieve(memory_source, context)
+        - Keyword overlap scoring
+        - Substring presence scoring
+        - Optional importance boost
+        - Optional length penalty (बहुत बड़े text के लिए)
+        - Deterministic, explainable scoring
     """
-    
-    def __init__(
-        self,
-        max_results: int = 10,
-        recency_weight: float = 0.3,
-        importance_weight: float = 0.3,
-        relevance_weight: float = 0.4,
-        enable_context_boost: bool = True,
-        scorer: Optional[HeuristicScorer] = None,
-        logger: Optional[logging.Logger] = None
-    ) -> None:
+
+    def __init__(self, config: Optional[RetrievalConfig] = None) -> None:
+        self.config: RetrievalConfig = config or RetrievalConfig()
+        # Index pool: simple list, कोई inverted index नहीं (Phase‑1)
+        self._items: Dict[str, RetrievalItem] = {}
+
+        logger.debug("DynamicRetrievalEngine initialized with config: %r", self.config)
+
+    # --------------------------------------------------------
+    # Public API: Add / Remove / Clear Items
+    # --------------------------------------------------------
+
+    def add_item(self, item: RetrievalItem) -> None:
         """
-        Initialize dynamic retrieval system.
-        
-        Args:
-            max_results: Maximum number of results to return
-            recency_weight: Weight for recency score (0.0-1.0)
-            importance_weight: Weight for importance score (0.0-1.0)
-            relevance_weight: Weight for relevance score (0.0-1.0)
-            enable_context_boost: Enable context-based score boosting
-            scorer: Custom scoring strategy (optional)
-            logger: Optional logger instance
-        
-        Raises:
-            ValueError: If weights don't sum to 1.0
+        Retrieval index में नया item add करता है।
         """
-        # Validate weights
-        total_weight = recency_weight + importance_weight + relevance_weight
-        if not (0.99 <= total_weight <= 1.01):  # Allow small floating point error
-            raise ValueError(
-                f"Weights must sum to 1.0, got {total_weight}"
-            )
-        
-        # Configuration
-        self.config: RetrievalConfig = {
-            "max_results": max_results,
-            "recency_weight": recency_weight,
-            "importance_weight": importance_weight,
-            "relevance_weight": relevance_weight,
-            "enable_context_boost": enable_context_boost
-        }
-        
-        # Components
-        self.scorer = scorer or HeuristicScorer()
-        self.logger = logger or self._setup_logger()
-        
-        self.logger.info(
-            f"DynamicRetrieval initialized: "
-            f"weights=[R:{recency_weight}, I:{importance_weight}, V:{relevance_weight}]"
-        )
-    
-    def _setup_logger(self) -> logging.Logger:
-        """Setup centralized logger (Phase-1 fallback)."""
-        logger = logging.getLogger("aumcore.memory.dynamic_retrieval")
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
-        return logger
-    
-    # ========================================================================
-    # PUBLIC API - RETRIEVAL OPERATIONS
-    # ========================================================================
-    
+        self._items[item.id] = item
+        logger.debug("Item added to retrieval index: %s", item.id)
+
+    def add_items(self, items: Iterable[RetrievalItem]) -> None:
+        """
+        Multiple items add करता है।
+        """
+        for item in items:
+            self.add_item(item)
+
+    def remove_item(self, item_id: str) -> bool:
+        """
+        ID से item remove करता है।
+        """
+        if item_id in self._items:
+            del self._items[item_id]
+            logger.debug("Item removed from retrieval index: %s", item_id)
+            return True
+        return False
+
+    def clear(self) -> None:
+        """
+        Index खाली करता है।
+        """
+        count = len(self._items)
+        self._items.clear()
+        logger.debug("DynamicRetrievalEngine index cleared (removed %d items).", count)
+
+    # --------------------------------------------------------
+    # Public API: Retrieval
+    # --------------------------------------------------------
+
     def retrieve(
         self,
-        memory_source: MemorySourceProtocol,
-        context: RetrievalContext,
-        filters: Optional[Dict[str, Any]] = None
+        query: str,
+        extra_filters: Optional[Dict[str, Any]] = None,
     ) -> List[RetrievalResult]:
         """
-        Retrieve and rank memory entries based on context.
-        
-        Args:
-            memory_source: Source of memory entries
-            context: Retrieval context with query and metadata
-            filters: Optional filtering criteria
-        
-        Returns:
-            List of ranked retrieval results
-        
-        Example:
-            >>> context = RetrievalContext(query="machine learning")
-            >>> results = retriever.retrieve(memory, context)
+        Given query string, rule-based scoring से items लौटाता है।
         """
-        try:
-            # Get all entries from source
-            all_entries = memory_source.get_all_entries()
-            
-            if not all_entries:
-                self.logger.warning("No entries found in memory source")
-                return []
-            
-            # Apply filters
-            if filters:
-                all_entries = self._apply_filters(all_entries, filters)
-            
-            # Score each entry
-            scored_results = []
-            for entry in all_entries:
-                result = self._score_entry(entry, context)
-                if result.final_score > 0.0:  # Only include non-zero scores
-                    scored_results.append(result)
-            
-            # Sort by final score (descending)
-            scored_results.sort(key=lambda r: r.final_score, reverse=True)
-            
-            # Apply diversity if enabled
-            if self.config["enable_context_boost"]:
-                scored_results = self._apply_diversity(scored_results)
-            
-            # Limit results
-            results = scored_results[:self.config["max_results"]]
-            
-            self.logger.debug(
-                f"Retrieved {len(results)} results for query: {context.query}"
+        q = _sanitize_query(query, self.config.max_query_length)
+        if not q:
+            logger.debug("Empty query, no retrieval.")
+            return []
+
+        q_norm = _normalize_text(q, self.config.case_sensitive)
+        q_keywords = _split_keywords(q_norm)
+
+        results: List[RetrievalResult] = []
+
+        for item in self._items.values():
+            if extra_filters and not self._match_filters(item, extra_filters):
+                continue
+
+            score, explanation = self._score_item(
+                query_norm=q_norm,
+                query_keywords=q_keywords,
+                item=item,
             )
-            
-            return results
-        
-        except Exception as e:
-            self.logger.error(f"Error during retrieval: {e}")
-            raise
-    
-    def retrieve_similar(
-        self,
-        memory_source: MemorySourceProtocol,
-        reference_content: str,
-        limit: int = 5
-    ) -> List[RetrievalResult]:
-        """
-        Find entries similar to reference content.
-        
-        Args:
-            memory_source: Source of memory entries
-            reference_content: Reference text for similarity
-            limit: Maximum results
-        
-        Returns:
-            List of similar entries
-        
-        Example:
-            >>> similar = retriever.retrieve_similar(memory, "Python code")
-        """
-        context = RetrievalContext(query=reference_content)
-        results = self.retrieve(memory_source, context)
-        return results[:limit]
-    
-    def retrieve_by_category(
-        self,
-        memory_source: MemorySourceProtocol,
-        category: str,
-        context: RetrievalContext
-    ) -> List[RetrievalResult]:
-        """
-        Retrieve entries from specific category.
-        
-        Args:
-            memory_source: Source of memory entries
-            category: Category to filter
-            context: Retrieval context
-        
-        Returns:
-            List of category-filtered results
-        
-        Example:
-            >>> results = retriever.retrieve_by_category(memory, "preference", ctx)
-        """
-        filters = {"category": category}
-        return self.retrieve(memory_source, context, filters)
-    
-    def retrieve_recent(
-        self,
-        memory_source: MemorySourceProtocol,
-        hours: int = 24,
-        limit: int = 10
-    ) -> List[RetrievalResult]:
-        """
-        Retrieve recent entries within time window.
-        
-        Args:
-            memory_source: Source of memory entries
-            hours: Time window in hours
-            limit: Maximum results
-        
-        Returns:
-            List of recent entries
-        
-        Example:
-            >>> recent = retriever.retrieve_recent(memory, hours=48)
-        """
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-        filters = {"min_timestamp": cutoff_time}
-        
-        # Use empty query to rely on recency scoring
-        context = RetrievalContext(query="")
-        results = self.retrieve(memory_source, context, filters)
-        
-        return results[:limit]
-    
-    # ========================================================================
-    # SCORING LOGIC
-    # ========================================================================
-    
-    def _score_entry(
-        self,
-        entry: Any,
-        context: RetrievalContext
-    ) -> RetrievalResult:
-        """
-        Calculate comprehensive score for a memory entry.
-        
-        Args:
-            entry: Memory entry to score
-            context: Retrieval context
-        
-        Returns:
-            RetrievalResult with all scoring components
-        """
-        # Extract entry attributes (assuming standard interface)
-        entry_id = getattr(entry, 'id', 'unknown')
-        content = getattr(entry, 'content', '')
-        timestamp = getattr(entry, 'timestamp', datetime.now())
-        importance = getattr(entry, 'importance', 0.5)
-        
-        # Calculate individual scores
-        relevance_score = self._calculate_relevance_score(content, context)
-        recency_score = self._calculate_recency_score(timestamp)
-        importance_score = importance  # Already normalized 0.0-1.0
-        
-        # Apply context boost if enabled
-        if self.config["enable_context_boost"]:
-            relevance_score = self._apply_context_boost(
-                relevance_score, entry, context
-            )
-        
-        # Calculate weighted final score
-        final_score = (
-            self.config["relevance_weight"] * relevance_score +
-            self.config["recency_weight"] * recency_score +
-            self.config["importance_weight"] * importance_score
-        )
-        
-        return RetrievalResult(
-            entry_id=entry_id,
-            content=content,
-            final_score=final_score,
-            relevance_score=relevance_score,
-            recency_score=recency_score,
-            importance_score=importance_score,
-            metadata=getattr(entry, 'metadata', {})
-        )
-    
-    def _calculate_relevance_score(
-        self,
-        content: str,
-        context: RetrievalContext
-    ) -> float:
-        """Calculate relevance score using scorer."""
-        if not context.query:
-            return 0.5  # Neutral score for empty query
-        
-        return self.scorer.calculate_relevance(content, context.query)
-    
-    def _calculate_recency_score(self, timestamp: datetime) -> float:
-        """
-        Calculate recency score using exponential decay.
-        
-        Args:
-            timestamp: Entry timestamp
-        
-        Returns:
-            Recency score (0.0 to 1.0)
-        """
-        age_hours = (datetime.now() - timestamp).total_seconds() / 3600
-        
-        # Exponential decay with half-life of 24 hours
-        half_life = 24.0
-        decay_rate = 0.693 / half_life  # ln(2) / half_life
-        
-        recency_score = 2 ** (-decay_rate * age_hours)
-        
-        return max(0.0, min(1.0, recency_score))
-    
-    def _apply_context_boost(
-        self,
-        base_score: float,
-        entry: Any,
-        context: RetrievalContext
-    ) -> float:
-        """
-        Apply context-based score boosting.
-        
-        Args:
-            base_score: Base relevance score
-            entry: Memory entry
-            context: Retrieval context
-        
-        Returns:
-            Boosted score
-        """
-        boost = 0.0
-        
-        # Check if entry category matches active topics
-        entry_category = getattr(entry, 'category', None)
-        if entry_category and entry_category in context.active_topics:
-            boost += 0.1
-        
-        # Check user preferences alignment
-        if context.user_preferences:
-            entry_metadata = getattr(entry, 'metadata', {})
-            for pref_key, pref_value in context.user_preferences.items():
-                if entry_metadata.get(pref_key) == pref_value:
-                    boost += 0.05
-        
-        # Check conversation history overlap
-        if context.conversation_history:
-            content = getattr(entry, 'content', '').lower()
-            for msg in context.conversation_history[-3:]:  # Last 3 messages
-                if any(word in content for word in msg.lower().split()):
-                    boost += 0.05
-                    break
-        
-        # Apply boost (max 20% increase)
-        boosted_score = base_score * (1.0 + min(boost, 0.2))
-        
-        return min(1.0, boosted_score)
-    
-    # ========================================================================
-    # FILTERING & RANKING
-    # ========================================================================
-    
-    def _apply_filters(
-        self,
-        entries: List[Any],
-        filters: Dict[str, Any]
-    ) -> List[Any]:
-        """
-        Apply filtering criteria to entries.
-        
-        Args:
-            entries: List of memory entries
-            filters: Filter criteria
-        
-        Returns:
-            Filtered list of entries
-        """
-        filtered = entries
-        
-        # Category filter
-        if "category" in filters:
-            filtered = [
-                e for e in filtered
-                if getattr(e, 'category', None) == filters["category"]
-            ]
-        
-        # Minimum timestamp filter
-        if "min_timestamp" in filters:
-            min_ts = filters["min_timestamp"]
-            filtered = [
-                e for e in filtered
-                if getattr(e, 'timestamp', datetime.min) >= min_ts
-            ]
-        
-        # Minimum importance filter
-        if "min_importance" in filters:
-            min_imp = filters["min_importance"]
-            filtered = [
-                e for e in filtered
-                if getattr(e, 'importance', 0.0) >= min_imp
-            ]
-        
-        return filtered
-    
-    def _apply_diversity(
-        self,
-        results: List[RetrievalResult]
-    ) -> List[RetrievalResult]:
-        """
-        Apply diversity to prevent redundant results.
-        
-        Args:
-            results: Scored results list
-        
-        Returns:
-            Diversified results list
-        """
-        if len(results) <= 3:
-            return results
-        
-        diverse_results = [results[0]]  # Always include top result
-        
-        for result in results[1:]:
-            # Check similarity with already selected results
-            is_diverse = True
-            for selected in diverse_results:
-                similarity = self._calculate_similarity(
-                    result.content, selected.content
+
+            if score >= self.config.min_score:
+                results.append(
+                    RetrievalResult(
+                        item_id=item.id,
+                        score=score,
+                        text=item.text,
+                        metadata=dict(item.metadata),
+                        match_explanation=explanation,
+                    )
                 )
-                if similarity > 0.8:  # Too similar
-                    is_diverse = False
-                    break
-            
-            if is_diverse:
-                diverse_results.append(result)
-        
-        return diverse_results
-    
-    def _calculate_similarity(self, text1: str, text2: str) -> float:
-        """
-        Calculate similarity between two texts (Phase-1: simple overlap).
-        
-        Args:
-            text1: First text
-            text2: Second text
-        
-        Returns:
-            Similarity score (0.0 to 1.0)
-        """
-        tokens1 = set(self.scorer._tokenize(text1.lower()))
-        tokens2 = set(self.scorer._tokenize(text2.lower()))
-        
-        if not tokens1 or not tokens2:
-            return 0.0
-        
-        intersection = tokens1 & tokens2
-        union = tokens1 | tokens2
-        
-        return len(intersection) / len(union) if union else 0.0
-    
-    # ========================================================================
-    # ASYNC API (Future-ready)
-    # ========================================================================
-    
-    async def retrieve_async(
-        self,
-        memory_source: MemorySourceProtocol,
-        context: RetrievalContext,
-        filters: Optional[Dict[str, Any]] = None
-    ) -> List[RetrievalResult]:
-        """Async version of retrieve."""
-        return await asyncio.to_thread(
-            self.retrieve, memory_source, context, filters
+
+        # sort by score desc, fallback importance
+        results.sort(key=lambda r: (r.score, r.metadata.get("importance", 0.0)), reverse=True)
+        if len(results) > self.config.max_results:
+            results = results[: self.config.max_results]
+
+        logger.debug(
+            "Query '%s' produced %d results (min_score=%.2f).",
+            q,
+            len(results),
+            self.config.min_score,
         )
-    
-    # ========================================================================
-    # CONFIGURATION MANAGEMENT
-    # ========================================================================
-    
-    def update_weights(
+
+        return results
+
+    # --------------------------------------------------------
+    # Public API: Simple Convenience Helpers
+    # --------------------------------------------------------
+
+    def top_one(
         self,
-        recency: Optional[float] = None,
-        importance: Optional[float] = None,
-        relevance: Optional[float] = None
-    ) -> None:
+        query: str,
+        extra_filters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[RetrievalResult]:
         """
-        Update scoring weights dynamically.
-        
-        Args:
-            recency: New recency weight
-            importance: New importance weight
-            relevance: New relevance weight
-        
-        Raises:
-            ValueError: If weights don't sum to 1.0
-        
-        Example:
-            >>> retriever.update_weights(recency=0.4, relevance=0.5)
+        Top‑1 result convenience wrapper।
         """
-        new_recency = recency if recency is not None else self.config["recency_weight"]
-        new_importance = importance if importance is not None else self.config["importance_weight"]
-        new_relevance = relevance if relevance is not None else self.config["relevance_weight"]
-        
-        total = new_recency + new_importance + new_relevance
-        if not (0.99 <= total <= 1.01):
-            raise ValueError(f"Weights must sum to 1.0, got {total}")
-        
-        self.config["recency_weight"] = new_recency
-        self.config["importance_weight"] = new_importance
-        self.config["relevance_weight"] = new_relevance
-        
-        self.logger.info(f"Updated weights: R:{new_recency}, I:{new_importance}, V:{new_relevance}")
+        results = self.retrieve(query, extra_filters=extra_filters)
+        return results[0] if results else None
+
+    def has_match(
+        self,
+        query: str,
+        min_score: Optional[float] = None,
+    ) -> bool:
+        """
+        जल्दी check करने के लिए कि कोई match है या नहीं।
+        """
+        original_min = self.config.min_score
+        if min_score is not None:
+            self.config.min_score = min_score
+        try:
+            res = self.top_one(query)
+            return res is not None
+        finally:
+            self.config.min_score = original_min
+
+    # ========================================================
+    # Internal: Filters + Scoring
+    # ========================================================
+
+    def _match_filters(
+        self,
+        item: RetrievalItem,
+        filters: Dict[str, Any],
+    ) -> bool:
+        """
+        Basic metadata filters (Phase‑1, equality-based)।
+        """
+        for key, expected in filters.items():
+            actual = item.metadata.get(key)
+            if actual != expected:
+                return False
+        return True
+
+    def _score_item(
+        self,
+        query_norm: str,
+        query_keywords: List[str],
+        item: RetrievalItem,
+    ) -> Tuple[float, str]:
+        """
+        Query और item के बीच rule-based score निकालता है।
+        """
+        text_norm = _normalize_text(item.text, self.config.case_sensitive)
+        item_keywords = _split_keywords(text_norm)
+
+        keyword_score, kw_detail = self._keyword_overlap_score(
+            query_keywords,
+            item_keywords,
+        )
+        substring_score, sub_detail = self._substring_score(
+            query_norm,
+            text_norm,
+        )
+
+        score = (
+            self.config.keyword_weight * keyword_score
+            + self.config.substring_weight * substring_score
+        )
+
+        # Optional importance boost
+        if self.config.boost_importance:
+            importance_boost = item.importance * 0.2  # 20% weight
+            score += importance_boost
+            importance_note = f" + importance_boost={importance_boost:.2f}"
+        else:
+            importance_note = ""
+
+        # Optional length penalty
+        length_note = ""
+        if self.config.length_penalty:
+            penalty = self._length_penalty(len(item_keywords))
+            if penalty < 1.0:
+                score *= penalty
+                length_note = f" * length_penalty={penalty:.2f}"
+
+        score = max(0.0, min(1.0, score))
+
+        explanation = (
+            f"keyword_score={keyword_score:.2f}, "
+            f"substring_score={substring_score:.2f}"
+            f"{importance_note}{length_note}; "
+            f"{kw_detail}; {sub_detail}"
+        )
+
+        return score, explanation
+
+    def _keyword_overlap_score(
+        self,
+        q_keywords: List[str],
+        item_keywords: List[str],
+    ) -> Tuple[float, str]:
+        """
+        Query और item keywords के overlap पर score।
+        """
+        if not q_keywords or not item_keywords:
+            return 0.0, "no keywords"
+
+        q_set = set(q_keywords)
+        i_set = set(item_keywords)
+
+        common = q_set.intersection(i_set)
+        if not common:
+            return 0.0, "no keyword overlap"
+
+        overlap_ratio = len(common) / len(q_set)
+        detail = f"keyword_overlap={len(common)}/{len(q_set)}"
+
+        return overlap_ratio, detail
+
+    def _substring_score(
+        self,
+        query_norm: str,
+        text_norm: str,
+    ) -> Tuple[float, str]:
+        """
+        Simple substring presence-based score।
+        """
+        if not query_norm or not text_norm:
+            return 0.0, "no substring match"
+
+        if query_norm in text_norm:
+            # exact substring presence
+            return 1.0, "full substring match"
+
+        # partial heuristic: proportion of query tokens present
+        q_tokens = _split_keywords(query_norm)
+        if not q_tokens:
+            return 0.0, "no query tokens"
+
+        hits = 0
+        for token in q_tokens:
+            if token in text_norm:
+                hits += 1
+
+        ratio = hits / len(q_tokens)
+        return ratio, f"partial substring hits={hits}/{len(q_tokens)}"
+
+    def _length_penalty(self, num_tokens: int) -> float:
+        """
+        बहुत बड़े text के लिए simple penalty (ताकि छोटे precise text को थोड़ा boost मिले)।
+        """
+        if num_tokens <= 0:
+            return 1.0
+        if num_tokens <= 50:
+            return 1.0
+        if num_tokens <= 200:
+            return 0.9
+        if num_tokens <= 500:
+            return 0.8
+        return 0.7
+
+    # ========================================================
+    # Introspection & Debug Utilities
+    # ========================================================
+
+    def debug_items_snapshot(self) -> List[Dict[str, Any]]:
+        """
+        Retrieval index का simple snapshot लौटाता है (debug के लिए)।
+        """
+        snapshot: List[Dict[str, Any]] = []
+        for item in self._items.values():
+            snapshot.append(
+                {
+                    "id": item.id,
+                    "text_preview": item.text[:80],
+                    "importance": item.importance,
+                    "metadata": dict(item.metadata),
+                }
+            )
+        return snapshot
+
+    def explain_query(
+        self,
+        query: str,
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Query के लिए top results + explanation structured form में देता है।
+        """
+        results = self.retrieve(query)
+        results = results[: max(1, top_k)]
+
+        explained: List[Dict[str, Any]] = []
+        for res in results:
+            explained.append(
+                {
+                    "id": res.item_id,
+                    "score": res.score,
+                    "explanation": res.match_explanation,
+                    "text_preview": res.text[:120],
+                }
+            )
+        return explained
 
 
-# ============================================================================
-# FACTORY PATTERN (Dependency Injection)
-# ============================================================================
+# ============================================================
+# Public Factory Helper
+# ============================================================
 
-def create_dynamic_retrieval(
-    config: Optional[RetrievalConfig] = None,
-    logger: Optional[logging.Logger] = None
-) -> DynamicRetrieval:
+def create_default_dynamic_retrieval_engine() -> DynamicRetrievalEngine:
     """
-    Factory function to create DynamicRetrieval instance.
-    
-    Args:
-        config: Optional retrieval configuration
-        logger: Optional logger instance
-    
-    Returns:
-        Configured DynamicRetrieval instance
-    
-    Example:
-        >>> retriever = create_dynamic_retrieval({"max_results": 15})
+    Default Phase‑1 config के साथ retrieval engine बनाता है।
     """
-    if config is None:
-        config = {
-            "max_results": 10,
-            "recency_weight": 0.3,
-            "importance_weight": 0.3,
-            "relevance_weight": 0.4,
-            "enable_context_boost": True
-        }
-    
-    return DynamicRetrieval(
-        max_results=config["max_results"],
-        recency_weight=config["recency_weight"],
-        importance_weight=config["importance_weight"],
-        relevance_weight=config["relevance_weight"],
-        enable_context_boost=config["enable_context_boost"],
-        logger=logger
-    )
+    config = RetrievalConfig()
+    return DynamicRetrievalEngine(config=config)
 
 
-# ============================================================================
-# MODULE EXPORTS
-# ============================================================================
+# ============================================================
+# Module Exports
+# ============================================================
 
 __all__ = [
-    "DynamicRetrieval",
-    "RetrievalContext",
+    "RetrievalItem",
     "RetrievalResult",
-    "HeuristicScorer",
     "RetrievalConfig",
-    "ScoredResult",
-    "create_dynamic_retrieval"
+    "DynamicRetrievalEngine",
+    "create_default_dynamic_retrieval_engine",
 ]
 
-
-# ============================================================================
-# TODO: FUTURE MODEL INTEGRATION (Phase-2+)
-# ============================================================================
-
-# TODO: Integrate Mistral-7B for:
-# - Semantic similarity scoring
-# - Neural re-ranking of results
-# - Query expansion and reformulation
-# - Context understanding for boosting
-
-# TODO: Add vector embeddings for semantic search
-
-# TODO: Implement learned-to-rank models
-
-# TODO: Add A/B testing framework for scoring strategies
-
-# TODO: Implement caching layer for frequent queries
+# End of File: memory/dynamic_retrieval.py (Phase‑1, ~500 lines with comments)
