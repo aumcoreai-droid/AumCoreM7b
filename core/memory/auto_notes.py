@@ -1,1026 +1,785 @@
 """
-Auto Notes Module for AumCore_AI
+AumCore_AI Memory Subsystem - Auto Notes Module
+Phase 1 Only (Chunk 1 + Chunk 2)
 
-This module automatically captures important information, insights, and key points
-from conversations and stores them as structured notes.
+File: memory/auto_notes.py
 
-Phase-1: Rule-based note extraction with keyword detection.
-Future: Integration with Mistral-7B for semantic importance detection.
+Description:
+    यह module conversations से important information को
+    rule-based तरीके से capture करके simple structured notes बनाता है।
 
-File: core/memory/auto_notes.py
+    Phase‑1 Rules:
+        - सिर्फ rule-based logic (keywords, length, simple scoring)
+        - कोई model integration नहीं (Mistral/LLM बाद में)
+        - कोई async dependency नहीं (सिर्फ basic helpers allowed)
+        - कोई external DB या complex indexing नहीं
+        - Safe, deterministic, testable behavior
+
+    Future (Phase‑3+):
+        - Semantic scoring via model adapters
+        - Advanced summarization + tagging
+        - Knowledge graph integration
 """
 
-import asyncio
+# ============================================================
+# ✅ Chunk 1: Imports (PEP8)
+# ============================================================
+
 import json
 import logging
-import re
+import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
 from uuid import uuid4
 
-# Type annotations
-from typing import TypedDict
+
+# ============================================================
+# ✅ Chunk 1: Local Logger Setup (Phase‑1 Safe)
+# ============================================================
+
+def get_auto_notes_logger(name: str = "AumCoreAI.Memory.AutoNotes") -> logging.Logger:
+    """
+    Auto notes module के लिए simple logger बनाता है।
+    Phase‑1 में यही local logger fallback रहेगा।
+    """
+    logger = logging.getLogger(name)
+
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] [AUTO_NOTES] [%(levelname)s] %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
 
 
-# ============================================================================
-# CONFIGURATION & TYPES
-# ============================================================================
-
-class NotesConfig(TypedDict):
-    """Configuration for auto notes."""
-    storage_path: str
-    auto_save: bool
-    max_notes: int
-    enable_auto_tagging: bool
-    importance_threshold: float
+logger = get_auto_notes_logger()
 
 
-class NoteDict(TypedDict):
-    """Type definition for a note."""
-    id: str
-    content: str
-    category: str
-    importance: float
-    tags: List[str]
-    timestamp: datetime
-    source: str
+# ============================================================
+# ✅ Chunk 2: Simple Config + Types (Rule-Based)
+# ============================================================
 
+@dataclass
+class AutoNotesConfig:
+    """
+    Auto notes के लिए Phase‑1 config (pure rule-based).
+    """
 
-# ============================================================================
-# DATA MODELS
-# ============================================================================
+    storage_path: str = "./data/auto_notes"
+    auto_save: bool = True
+    max_notes: int = 500
+    enable_auto_tagging: bool = True
+    importance_threshold: float = 0.3
+    max_text_length: int = 4000
+
+    def __post_init__(self) -> None:
+        """
+        Basic validation (rule-based).
+        """
+        if self.max_notes <= 0:
+            raise ValueError("max_notes positive होना चाहिए।")
+        if not (0.0 <= self.importance_threshold <= 1.0):
+            raise ValueError("importance_threshold 0.0–1.0 के बीच होना चाहिए।")
+        if self.max_text_length <= 0:
+            raise ValueError("max_text_length positive होना चाहिए।")
+
 
 @dataclass
 class Note:
-    """Represents a single auto-generated note."""
-    
+    """
+    Phase‑1 का simple Note model.
+    कोई complex relation, embedding, या model metadata नहीं।
+    """
+
     id: str = field(default_factory=lambda: str(uuid4()))
     content: str = ""
     category: str = "general"
-    importance: float = 0.5  # 0.0 to 1.0
+    importance: float = 0.5
     tags: List[str] = field(default_factory=list)
     timestamp: datetime = field(default_factory=datetime.now)
     source: str = "conversation"
-    context: Dict[str, Any] = field(default_factory=dict)
-    
+
     def __post_init__(self) -> None:
-        """Validate note after initialization."""
+        """
+        Note creation पर basic validation.
+        """
         if not self.content:
-            raise ValueError("Note content cannot be empty")
-        if not 0.0 <= self.importance <= 1.0:
-            raise ValueError("Importance must be between 0.0 and 1.0")
-    
-    def to_dict(self) -> NoteDict:
-        """Convert to dictionary format."""
+            raise ValueError("Note content empty नहीं होना चाहिए।")
+        if not (0.0 <= self.importance <= 1.0):
+            raise ValueError("importance 0.0–1.0 के बीच होना चाहिए।")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Dict representation (persistence और inspection के लिए).
+        """
         return {
             "id": self.id,
             "content": self.content,
             "category": self.category,
             "importance": self.importance,
-            "tags": self.tags,
-            "timestamp": self.timestamp,
-            "source": self.source
+            "tags": list(self.tags),
+            "timestamp": self.timestamp.isoformat(),
+            "source": self.source,
         }
-    
-    def add_tag(self, tag: str) -> None:
-        """Add a tag to the note."""
-        tag_lower = tag.lower().strip()
-        if tag_lower and tag_lower not in self.tags:
-            self.tags.append(tag_lower)
 
 
-# ============================================================================
-# CORE AUTO NOTES CLASS
-# ============================================================================
+# ============================================================
+# ✅ Chunk 2: Sanitization Utilities (Rule-Based)
+# ============================================================
+
+def _sanitize_text_for_note(text: str, max_length: int) -> str:
+    """
+    Simple text sanitization for auto notes.
+    """
+    if text is None:
+        return ""
+
+    cleaned = text.strip()
+    if len(cleaned) > max_length:
+        cleaned = cleaned[:max_length].rstrip()
+
+    return cleaned
+
+
+def _sanitize_tags(tags: Optional[List[str]]) -> List[str]:
+    """
+    Simple tag sanitization: lowercase + strip + unique.
+    """
+    if tags is None:
+        return []
+
+    clean: List[str] = []
+    seen: Set[str] = set()
+
+    for tag in tags:
+        if tag is None:
+            continue
+        t = str(tag).strip().lower()
+        if not t:
+            continue
+        if t not in seen:
+            seen.add(t)
+            clean.append(t)
+
+    return clean
+
+
+# ============================================================
+# ✅ Chunk 2: Validation Helpers (Rule-Based)
+# ============================================================
+
+def _validate_source(source: Optional[str]) -> str:
+    """
+    Source field के लिए simple validation.
+    """
+    if source is None:
+        return "unknown"
+
+    s = str(source).strip()
+    if not s:
+        return "unknown"
+    return s
+
+
+def _validate_category(name: Optional[str]) -> str:
+    """
+    Category validation (Phase‑1: सिर्फ non-empty string).
+    """
+    if name is None:
+        return "general"
+    cat = str(name).strip()
+    return cat if cat else "general"
+
+
+def _validate_importance(value: float) -> float:
+    """
+    Importance को clamp करता है 0.0–1.0 के बीच।
+    """
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+# ============================================================
+# ✅ Core Class: AutoNotes (Phase‑1 Version)
+# ============================================================
 
 class AutoNotes:
     """
-    Automatic note-taking system for conversations.
-    
-    Features:
-    - Automatic key point extraction
-    - Importance scoring
-    - Category classification
-    - Tag generation
-    - Search and filtering
-    - Note organization
-    
-    Attributes:
-        config: Notes configuration
-        notes: Dictionary of notes by ID
-        category_index: Index of notes by category
-        tag_index: Index of notes by tag
-        logger: Centralized logger instance
-    
-    Example:
-        >>> auto_notes = AutoNotes()
-        >>> note_id = auto_notes.capture_from_text("User prefers Python for AI")
-        >>> notes = auto_notes.search("Python")
+    Automatic note capture system (Phase‑1, pure rule-based).
+
+    Features (Phase‑1):
+        - Keyword-based importance scoring
+        - Simple category detection (keyword buckets)
+        - Basic tag extraction (keywords + simple heuristics)
+        - File-based persistence (single JSON file)
+        - Simple search (substring match, no ranking model)
+
+    Future (Phase‑3+):
+        - Semantic extraction via model
+        - Rich metadata, embeddings, relationships
     """
-    
-    def __init__(
-        self,
-        storage_path: str = "./data/auto_notes",
-        auto_save: bool = True,
-        max_notes: int = 5000,
-        enable_auto_tagging: bool = True,
-        importance_threshold: float = 0.3,
-        logger: Optional[logging.Logger] = None
-    ) -> None:
+
+    def __init__(self, config: Optional[AutoNotesConfig] = None) -> None:
         """
-        Initialize auto notes system.
-        
+        AutoNotes system initialize करता है।
+
         Args:
-            storage_path: Directory path for notes storage
-            auto_save: Automatically save after modifications
-            max_notes: Maximum number of notes to retain
-            enable_auto_tagging: Enable automatic tag generation
-            importance_threshold: Minimum importance for capturing
-            logger: Optional logger instance
-        
-        Raises:
-            ValueError: If parameters are invalid
+            config: Optional AutoNotesConfig
         """
-        # Validation
-        if max_notes <= 0:
-            raise ValueError("max_notes must be positive")
-        if not 0.0 <= importance_threshold <= 1.0:
-            raise ValueError("importance_threshold must be between 0.0 and 1.0")
-        
-        # Configuration
-        self.config: NotesConfig = {
-            "storage_path": storage_path,
-            "auto_save": auto_save,
-            "max_notes": max_notes,
-            "enable_auto_tagging": enable_auto_tagging,
-            "importance_threshold": importance_threshold
+        self.config: AutoNotesConfig = config or AutoNotesConfig()
+
+        # Storage path
+        self._storage_path = Path(self.config.storage_path)
+        self._storage_path.mkdir(parents=True, exist_ok=True)
+
+        # In-memory storage
+        self._notes: Dict[str, Note] = {}
+
+        # Simple indices
+        self._category_index: Dict[str, Set[str]] = {}
+        self._tag_index: Dict[str, Set[str]] = {}
+
+        # Rule-based keyword tables
+        self._importance_keywords: Dict[str, List[str]] = {
+            "high": [
+                "important",
+                "critical",
+                "must",
+                "remember",
+                "urgent",
+                "key point",
+                "note this",
+            ],
+            "medium": [
+                "should",
+                "prefer",
+                "like",
+                "need",
+                "want",
+                "recommend",
+            ],
         }
-        
-        # Storage
-        self.storage_path = Path(storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-        
-        # Notes storage
-        self.notes: Dict[str, Note] = {}
-        
-        # Indexes for fast lookup
-        self.category_index: Dict[str, Set[str]] = {}
-        self.tag_index: Dict[str, Set[str]] = {}
-        
-        # Keywords for importance detection (Phase-1)
-        self._importance_keywords = {
-            "high": ["important", "critical", "essential", "must", "required", 
-                    "remember", "note", "key", "crucial", "vital"],
-            "medium": ["should", "prefer", "like", "want", "need", "consider"],
-            "context": ["because", "since", "due to", "reason", "explanation"]
+
+        self._category_keywords: Dict[str, List[str]] = {
+            "preference": ["prefer", "like", "love", "hate", "favorite"],
+            "todo": ["remember", "remind", "deadline", "task", "todo"],
+            "instruction": ["must", "need to", "should", "have to"],
+            "fact": ["is", "are", "was", "were", "fact"],
         }
-        
-        # Category keywords (Phase-1)
-        self._category_keywords = {
-            "preference": ["prefer", "like", "favorite", "choice", "want"],
-            "fact": ["is", "are", "was", "were", "fact", "true"],
-            "instruction": ["do", "don't", "should", "must", "need to"],
-            "question": ["what", "why", "how", "when", "where", "who"],
-            "insight": ["realize", "understand", "learn", "discover", "found"]
-        }
-        
-        # Logging
-        self.logger = logger or self._setup_logger()
-        
-        # Load existing notes
+
         self._load_from_disk()
-        
-        self.logger.info(
-            f"AutoNotes initialized: {len(self.notes)} notes loaded"
+
+        logger.debug(
+            "AutoNotes initialized (Phase‑1): %d notes loaded from disk.",
+            len(self._notes),
         )
-    
-    def _setup_logger(self) -> logging.Logger:
-        """Setup centralized logger (Phase-1 fallback)."""
-        logger = logging.getLogger("aumcore.memory.auto_notes")
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
-        return logger
-    
-    # ========================================================================
-    # PUBLIC API - NOTE CAPTURE
-    # ========================================================================
-    
+
+    # --------------------------------------------------------
+    # Public API: Capture from text
+    # --------------------------------------------------------
+
     def capture_from_text(
         self,
         text: str,
-        source: str = "conversation",
-        context: Optional[Dict[str, Any]] = None
+        source: Optional[str] = "conversation",
     ) -> Optional[str]:
         """
-        Capture notes from text automatically.
-        
-        Args:
-            text: Text to extract notes from
-            source: Source of the text
-            context: Optional context information
-        
-        Returns:
-            Note ID if captured, None if below threshold
-        
-        Example:
-            >>> note_id = auto_notes.capture_from_text("Remember to use Python 3.10")
+        दिए गए text से note capture करने की कोशिश करता है।
+
+        Rules:
+            - Text sanitize
+            - Importance score निकालना (keyword-based)
+            - Threshold से कम हो तो note नहीं बनेगा
         """
-        try:
-            # Calculate importance
-            importance = self._calculate_importance(text)
-            
-            # Skip if below threshold
-            if importance < self.config["importance_threshold"]:
-                self.logger.debug(f"Text below importance threshold: {importance:.2f}")
-                return None
-            
-            # Detect category
-            category = self._detect_category(text)
-            
-            # Create note
-            note = Note(
-                content=text.strip(),
-                category=category,
-                importance=importance,
-                source=source,
-                context=context or {}
-            )
-            
-            # Auto-tagging
-            if self.config["enable_auto_tagging"]:
-                tags = self._extract_tags(text)
-                for tag in tags:
-                    note.add_tag(tag)
-            
-            # Check limit
-            if len(self.notes) >= self.config["max_notes"]:
-                self._prune_notes()
-            
-            # Store note
-            self.notes[note.id] = note
-            
-            # Update indexes
-            self._update_indexes(note)
-            
-            self.logger.debug(
-                f"Captured note: {category}, importance={importance:.2f}"
-            )
-            
-            if self.config["auto_save"]:
-                self._save_to_disk()
-            
-            return note.id
-        
-        except Exception as e:
-            self.logger.error(f"Error capturing note: {e}")
+        cleaned = _sanitize_text_for_note(text, self.config.max_text_length)
+        if not cleaned:
+            logger.debug("Empty text, skipping note capture.")
             return None
-    
-    def capture_from_conversation(
+
+        importance = self._calculate_importance(cleaned)
+
+        if importance < self.config.importance_threshold:
+            logger.debug(
+                "Text importance %.2f threshold %.2f से कम है, note skip.",
+                importance,
+                self.config.importance_threshold,
+            )
+            return None
+
+        category = self._detect_category(cleaned)
+        src = _validate_source(source)
+
+        tags: List[str] = []
+        if self.config.enable_auto_tagging:
+            tags = self._extract_tags(cleaned)
+
+        note = Note(
+            content=cleaned,
+            category=_validate_category(category),
+            importance=_validate_importance(importance),
+            tags=_sanitize_tags(tags),
+            source=src,
+        )
+
+        self._store_note(note)
+        return note.id
+
+    def capture_from_messages(
         self,
-        messages: List[Dict[str, str]],
-        extract_summary: bool = True
+        messages: List[Dict[str, Any]],
     ) -> List[str]:
         """
-        Capture notes from conversation history.
-        
+        Simple conversation messages list से notes capture करता है।
+
         Args:
-            messages: List of conversation messages
-            extract_summary: Extract summary note
-        
+            messages: list of {"role": ..., "content": ...}
+
         Returns:
-            List of captured note IDs
-        
-        Example:
-            >>> messages = [{"role": "user", "content": "I like Python"}]
-            >>> note_ids = auto_notes.capture_from_conversation(messages)
+            captured note IDs list
         """
-        captured_ids = []
-        
-        for message in messages:
-            content = message.get("content", "")
-            role = message.get("role", "unknown")
-            
-            note_id = self.capture_from_text(
-                content,
-                source=f"conversation:{role}",
-                context={"role": role}
-            )
-            
+        captured: List[str] = []
+        for msg in messages:
+            content = str(msg.get("content", "")).strip()
+            if not content:
+                continue
+
+            role = str(msg.get("role", "unknown"))
+            src = f"conversation:{role}"
+
+            note_id = self.capture_from_text(content, source=src)
             if note_id:
-                captured_ids.append(note_id)
-        
-        # Extract summary if enabled
-        if extract_summary and len(messages) > 2:
-            summary = self._generate_conversation_summary(messages)
-            if summary:
-                summary_id = self.capture_from_text(
-                    summary,
-                    source="conversation:summary",
-                    context={"message_count": len(messages)}
-                )
-                if summary_id:
-                    captured_ids.append(summary_id)
-        
-        return captured_ids
-    
+                captured.append(note_id)
+
+        return captured
+
+    # --------------------------------------------------------
+    # Public API: Manual note add + retrieval
+    # --------------------------------------------------------
+
     def add_note(
         self,
         content: str,
         category: str = "general",
         importance: float = 0.5,
         tags: Optional[List[str]] = None,
-        source: str = "manual"
+        source: str = "manual",
     ) -> str:
         """
-        Manually add a note.
-        
-        Args:
-            content: Note content
-            category: Note category
-            importance: Importance score
-            tags: Optional tags
-            source: Note source
-        
-        Returns:
-            Note ID
-        
-        Example:
-            >>> note_id = auto_notes.add_note("Important deadline", "reminder", 0.9)
+        Manually note create करता है (Phase‑1 safe).
         """
+        cleaned = _sanitize_text_for_note(content, self.config.max_text_length)
+        if not cleaned:
+            raise ValueError("Manual note content empty नहीं हो सकता।")
+
         note = Note(
-            content=content,
-            category=category,
-            importance=importance,
-            tags=tags or [],
-            source=source
+            content=cleaned,
+            category=_validate_category(category),
+            importance=_validate_importance(importance),
+            tags=_sanitize_tags(tags or []),
+            source=_validate_source(source),
         )
-        
-        self.notes[note.id] = note
-        self._update_indexes(note)
-        
-        if self.config["auto_save"]:
-            self._save_to_disk()
-        
-        self.logger.debug(f"Added manual note: {note.id}")
-        
+        self._store_note(note)
         return note.id
-    
-    # ========================================================================
-    # PUBLIC API - NOTE RETRIEVAL
-    # ========================================================================
-    
+
     def get_note(self, note_id: str) -> Optional[Note]:
         """
-        Retrieve a specific note.
-        
-        Args:
-            note_id: Note ID
-        
-        Returns:
-            Note if found, None otherwise
-        
-        Example:
-            >>> note = auto_notes.get_note(note_id)
+        ID से single note return करता है (या None अगर ना मिले)।
         """
-        return self.notes.get(note_id)
-    
+        return self._notes.get(note_id)
+
+    def list_all_notes(self) -> List[Note]:
+        """
+        सारे notes list करता है (sorted by timestamp desc).
+        """
+        notes = list(self._notes.values())
+        notes.sort(key=lambda n: n.timestamp, reverse=True)
+        return notes
+
+    # --------------------------------------------------------
+    # Public API: Simple search + filters
+    # --------------------------------------------------------
+
     def search(
         self,
         query: str,
-        category: Optional[str] = None,
         min_importance: float = 0.0,
-        limit: int = 10
+        category: Optional[str] = None,
+        limit: int = 20,
     ) -> List[Note]:
         """
-        Search notes by content.
-        
-        Args:
-            query: Search query
-            category: Filter by category
-            min_importance: Minimum importance threshold
-            limit: Maximum results
-        
-        Returns:
-            List of matching notes
-        
-        Example:
-            >>> results = auto_notes.search("Python", category="preference")
+        Simple substring search (Phase‑1, no semantic ranking).
         """
-        query_lower = query.lower()
-        matches = []
-        
-        for note in self.notes.values():
-            # Category filter
+        q = query.lower().strip()
+        if not q:
+            return []
+
+        results: List[Note] = []
+        for note in self._notes.values():
             if category and note.category != category:
                 continue
-            
-            # Importance filter
             if note.importance < min_importance:
                 continue
-            
-            # Content match
-            if query_lower in note.content.lower():
-                matches.append(note)
-        
-        # Sort by importance (descending)
-        matches.sort(key=lambda n: n.importance, reverse=True)
-        
-        return matches[:limit]
-    
-    def get_by_category(self, category: str) -> List[Note]:
+            if q in note.content.lower():
+                results.append(note)
+
+        results.sort(key=lambda n: (n.importance, n.timestamp), reverse=True)
+        return results[: max(1, limit)]
+
+    def notes_by_category(self, category: str) -> List[Note]:
         """
-        Get all notes in a category.
-        
-        Args:
-            category: Category to filter
-        
-        Returns:
-            List of notes
-        
-        Example:
-            >>> prefs = auto_notes.get_by_category("preference")
+        दिए गए category के notes लौटाता है (newest first)।
         """
-        note_ids = self.category_index.get(category, set())
-        notes = [self.notes[nid] for nid in note_ids if nid in self.notes]
-        
-        # Sort by timestamp (newest first)
+        cat = _validate_category(category)
+        ids = self._category_index.get(cat, set())
+        notes = [self._notes[i] for i in ids if i in self._notes]
         notes.sort(key=lambda n: n.timestamp, reverse=True)
-        
         return notes
-    
-    def get_by_tag(self, tag: str) -> List[Note]:
+
+    def notes_by_tag(self, tag: str) -> List[Note]:
         """
-        Get all notes with a specific tag.
-        
-        Args:
-            tag: Tag to filter
-        
-        Returns:
-            List of notes
-        
-        Example:
-            >>> python_notes = auto_notes.get_by_tag("python")
+        दिए गए tag वाले notes return करता है।
         """
-        note_ids = self.tag_index.get(tag.lower(), set())
-        notes = [self.notes[nid] for nid in note_ids if nid in self.notes]
-        
-        # Sort by importance
+        t = str(tag).strip().lower()
+        if not t:
+            return []
+
+        ids = self._tag_index.get(t, set())
+        notes = [self._notes[i] for i in ids if i in self._notes]
         notes.sort(key=lambda n: n.importance, reverse=True)
-        
         return notes
-    
-    def get_most_important(self, limit: int = 10) -> List[Note]:
+
+    def recent_notes(
+        self,
+        hours: int = 24,
+        limit: int = 20,
+    ) -> List[Note]:
         """
-        Get most important notes.
-        
-        Args:
-            limit: Number of notes to retrieve
-        
-        Returns:
-            List of notes sorted by importance
-        
-        Example:
-            >>> important = auto_notes.get_most_important(5)
+        दिए गए घंटों के भीतर बनाए गए notes देता है।
         """
-        sorted_notes = sorted(
-            self.notes.values(),
-            key=lambda n: n.importance,
-            reverse=True
-        )
-        return sorted_notes[:limit]
-    
-    def get_recent(self, hours: int = 24, limit: int = 10) -> List[Note]:
-        """
-        Get recent notes within time window.
-        
-        Args:
-            hours: Time window in hours
-            limit: Maximum results
-        
-        Returns:
-            List of recent notes
-        
-        Example:
-            >>> recent = auto_notes.get_recent(hours=48)
-        """
-        from datetime import timedelta
-        
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-        
-        recent_notes = [
-            note for note in self.notes.values()
-            if note.timestamp >= cutoff_time
+        cutoff = datetime.now() - timedelta(hours=hours)
+        candidates = [
+            n for n in self._notes.values() if n.timestamp >= cutoff
         ]
-        
-        # Sort by timestamp (newest first)
-        recent_notes.sort(key=lambda n: n.timestamp, reverse=True)
-        
-        return recent_notes[:limit]
-    
-    # ========================================================================
-    # PUBLIC API - NOTE MANAGEMENT
-    # ========================================================================
-    
+        candidates.sort(key=lambda n: n.timestamp, reverse=True)
+        return candidates[: max(1, limit)]
+
+    # --------------------------------------------------------
+    # Public API: Update + Delete
+    # --------------------------------------------------------
+
     def update_note(
         self,
         note_id: str,
         content: Optional[str] = None,
         category: Optional[str] = None,
         importance: Optional[float] = None,
-        tags: Optional[List[str]] = None
+        tags: Optional[List[str]] = None,
     ) -> bool:
         """
-        Update a note.
-        
-        Args:
-            note_id: Note ID to update
-            content: New content
-            category: New category
-            importance: New importance
-            tags: New tags
-        
-        Returns:
-            True if updated, False if not found
-        
-        Example:
-            >>> auto_notes.update_note(note_id, importance=0.9)
+        Existing note को update करता है (Phase‑1 safe fields).
         """
-        note = self.notes.get(note_id)
-        if not note:
+        note = self._notes.get(note_id)
+        if note is None:
             return False
-        
-        # Remove from old indexes
-        self._remove_from_indexes(note)
-        
-        # Update fields
+
+        # पहले indexes से हटाओ
+        self._remove_from_indices(note)
+
         if content is not None:
-            note.content = content
+            note.content = _sanitize_text_for_note(
+                content,
+                self.config.max_text_length,
+            )
         if category is not None:
-            note.category = category
+            note.category = _validate_category(category)
         if importance is not None:
-            note.importance = max(0.0, min(1.0, importance))
+            note.importance = _validate_importance(importance)
         if tags is not None:
-            note.tags = [t.lower() for t in tags]
-        
-        # Re-add to indexes
-        self._update_indexes(note)
-        
-        if self.config["auto_save"]:
+            note.tags = _sanitize_tags(tags)
+
+        # दोबारा indices में डालो
+        self._add_to_indices(note)
+
+        if self.config.auto_save:
             self._save_to_disk()
-        
-        self.logger.debug(f"Updated note: {note_id}")
+
         return True
-    
+
     def delete_note(self, note_id: str) -> bool:
         """
-        Delete a note.
-        
-        Args:
-            note_id: Note ID to delete
-        
-        Returns:
-            True if deleted, False if not found
-        
-        Example:
-            >>> auto_notes.delete_note(note_id)
+        Note delete करता है (indices से भी remove).
         """
-        note = self.notes.get(note_id)
-        if not note:
+        note = self._notes.get(note_id)
+        if note is None:
             return False
-        
-        # Remove from indexes
-        self._remove_from_indexes(note)
-        
-        # Delete note
-        del self.notes[note_id]
-        
-        if self.config["auto_save"]:
+
+        self._remove_from_indices(note)
+        del self._notes[note_id]
+
+        if self.config.auto_save:
             self._save_to_disk()
-        
-        self.logger.debug(f"Deleted note: {note_id}")
+
         return True
-    
+
     def clear_all(self) -> None:
         """
-        Clear all notes.
-        
-        Example:
-            >>> auto_notes.clear_all()
+        सारे notes clear कर देता है (Phase‑1 simple reset).
         """
-        count = len(self.notes)
-        
-        self.notes.clear()
-        self.category_index.clear()
-        self.tag_index.clear()
-        
-        if self.config["auto_save"]:
+        count = len(self._notes)
+        self._notes.clear()
+        self._category_index.clear()
+        self._tag_index.clear()
+
+        if self.config.auto_save:
             self._save_to_disk()
-        
-        self.logger.info(f"Cleared {count} notes")
-    
-    # ========================================================================
-    # STATISTICS & ANALYSIS
-    # ========================================================================
-    
-    def get_statistics(self) -> Dict[str, Any]:
+
+        logger.info("AutoNotes: %d notes cleared.", count)
+
+    # --------------------------------------------------------
+    # Public API: Basic statistics
+    # --------------------------------------------------------
+
+    def statistics(self) -> Dict[str, Any]:
         """
-        Get notes statistics.
-        
-        Returns:
-            Dictionary with statistics
-        
-        Example:
-            >>> stats = auto_notes.get_statistics()
+        Simple stats देता है (Phase‑1).
         """
-        if not self.notes:
-            return {
-                "total_notes": 0,
-                "by_category": {},
-                "by_source": {},
-                "avg_importance": 0.0
-            }
-        
-        categories = {}
-        sources = {}
-        
-        for note in self.notes.values():
-            categories[note.category] = categories.get(note.category, 0) + 1
-            sources[note.source] = sources.get(note.source, 0) + 1
-        
+        total = len(self._notes)
+        by_category: Dict[str, int] = {}
+        tag_count = len(self._tag_index)
+
+        for note in self._notes.values():
+            by_category[note.category] = by_category.get(note.category, 0) + 1
+
+        avg_importance = (
+            sum(n.importance for n in self._notes.values()) / total
+            if total > 0
+            else 0.0
+        )
+
         return {
-            "total_notes": len(self.notes),
-            "by_category": categories,
-            "by_source": sources,
-            "avg_importance": sum(n.importance for n in self.notes.values()) / len(self.notes),
-            "total_tags": len(self.tag_index),
-            "config": self.config.copy()
+            "total_notes": total,
+            "by_category": by_category,
+            "total_tags": tag_count,
+            "avg_importance": avg_importance,
         }
-    
-    # ========================================================================
-    # PERSISTENCE
-    # ========================================================================
-    
-    def save(self) -> None:
-        """
-        Manually save notes to disk.
-        
-        Example:
-            >>> auto_notes.save()
-        """
-        self._save_to_disk()
-    
-    def _save_to_disk(self) -> None:
-        """Save notes to disk storage."""
-        try:
-            notes_file = self.storage_path / "notes.json"
-            
-            data = {
-                "notes": {},
-                "metadata": {
-                    "saved_at": datetime.now().isoformat(),
-                    "version": "1.0"
-                }
-            }
-            
-            # Serialize notes
-            for note_id, note in self.notes.items():
-                data["notes"][note_id] = {
-                    "id": note.id,
-                    "content": note.content,
-                    "category": note.category,
-                    "importance": note.importance,
-                    "tags": note.tags,
-                    "timestamp": note.timestamp.isoformat(),
-                    "source": note.source,
-                    "context": note.context
-                }
-            
-            with open(notes_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            self.logger.debug(f"Saved {len(self.notes)} notes to disk")
-        
-        except Exception as e:
-            self.logger.error(f"Error saving notes: {e}")
-    
-    def _load_from_disk(self) -> None:
-        """Load notes from disk storage."""
-        try:
-            notes_file = self.storage_path / "notes.json"
-            
-            if not notes_file.exists():
-                self.logger.info("No existing notes file found")
-                return
-            
-            with open(notes_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # Load notes
-            for note_id, note_data in data.get("notes", {}).items():
-                note = Note(
-                    id=note_data["id"],
-                    content=note_data["content"],
-                    category=note_data["category"],
-                    importance=note_data["importance"],
-                    tags=note_data.get("tags", []),
-                    timestamp=datetime.fromisoformat(note_data["timestamp"]),
-                    source=note_data.get("source", "unknown"),
-                    context=note_data.get("context", {})
-                )
-                self.notes[note_id] = note
-                self._update_indexes(note)
-            
-            self.logger.info(f"Loaded {len(self.notes)} notes from disk")
-        
-        except Exception as e:
-            self.logger.error(f"Error loading notes: {e}")
-    
-    # ========================================================================
-    # INTERNAL HELPERS - IMPORTANCE & CATEGORIZATION
-    # ========================================================================
-    
+
+    # ========================================================
+    # Internal: Importance + Category + Tags (Rule-Based)
+    # ========================================================
+
     def _calculate_importance(self, text: str) -> float:
         """
-        Calculate importance score for text (Phase-1: keyword-based).
-        
-        Args:
-            text: Text to score
-        
-        Returns:
-            Importance score (0.0 to 1.0)
+        Keyword-based importance score (Phase‑1).
         """
-        text_lower = text.lower()
-        score = 0.5  # Base score
-        
-        # Check high importance keywords
-        for keyword in self._importance_keywords["high"]:
-            if keyword in text_lower:
-                score += 0.15
-        
-        # Check medium importance keywords
-        for keyword in self._importance_keywords["medium"]:
-            if keyword in text_lower:
-                score += 0.08
-        
-        # Check context keywords
-        for keyword in self._importance_keywords["context"]:
-            if keyword in text_lower:
-                score += 0.05
-        
-        # Length bonus (longer text might be more detailed)
-        words = len(text.split())
-        if words > 20:
+        t = text.lower()
+        score = 0.4  # base
+
+        for kw in self._importance_keywords["high"]:
+            if kw in t:
+                score += 0.2
+        for kw in self._importance_keywords["medium"]:
+            if kw in t:
+                score += 0.1
+
+        if len(text.split()) > 20:
             score += 0.1
-        
-        # Question mark or exclamation (emphasis)
-        if '?' in text or '!' in text:
+
+        if "?" in text or "!" in text:
             score += 0.05
-        
-        return min(1.0, score)
-    
+
+        return _validate_importance(score)
+
     def _detect_category(self, text: str) -> str:
         """
-        Detect category from text (Phase-1: keyword-based).
-        
-        Args:
-            text: Text to categorize
-        
-        Returns:
-            Category name
+        Text से category guess करता है (simple keyword count से).
         """
-        text_lower = text.lower()
-        
-        category_scores = {}
-        for category, keywords in self._category_keywords.items():
-            score = sum(1 for kw in keywords if kw in text_lower)
-            if score > 0:
-                category_scores[category] = score
-        
-        if category_scores:
-            return max(category_scores.items(), key=lambda x: x[1])[0]
-        
-        return "general"
-    
+        t = text.lower()
+        best_cat = "general"
+        best_score = 0
+
+        for cat, kws in self._category_keywords.items():
+            score = sum(1 for kw in kws if kw in t)
+            if score > best_score:
+                best_score = score
+                best_cat = cat
+
+        return best_cat
+
     def _extract_tags(self, text: str) -> List[str]:
         """
-        Extract tags from text (Phase-1: simple extraction).
-        
-        Args:
-            text: Text to extract tags from
-        
-        Returns:
-            List of tags
+        Basic tag extraction (Phase‑1): keywords + simple heuristics।
         """
-        tags = []
-        
-        # Extract capitalized words (potential proper nouns)
-        words = re.findall(r'[A-Z][a-z]+', text)
-        tags.extend([w.lower() for w in words[:3]])  # Limit to 3
-        
-        # Extract quoted phrases
-        quoted = re.findall(r'"([^"]+)"', text)
-        tags.extend([q.lower() for q in quoted[:2]])
-        
-        # Extract technology/programming terms (common patterns)
-        tech_patterns = [
-            r'(python|java|javascript|c\\+\\+|rust|go)',
-            r'(ai|ml|nlp|api|database|server)',
-            r'(react|vue|angular|django|flask)'
-        ]
-        
-        for pattern in tech_patterns:
-            matches = re.findall(pattern, text.lower())
-            tags.extend(matches)
-        
-        # Remove duplicates and limit
-        return list(dict.fromkeys(tags))[:5]
-    
-    def _generate_conversation_summary(
-        self,
-        messages: List[Dict[str, str]]
-    ) -> Optional[str]:
+        words = text.split()
+        tags: List[str] = []
+
+        for w in words:
+            w_clean = "".join(ch for ch in w if ch.isalnum()).lower()
+            if not w_clean:
+                continue
+            # simple heuristic: medium/high importance keywords as tags
+            for bucket in self._importance_keywords.values():
+                if w_clean in bucket and w_clean not in tags:
+                    tags.append(w_clean)
+
+        # limit tags count
+        if len(tags) > 5:
+            tags = tags[:5]
+
+        return tags
+
+    # ========================================================
+    # Internal: Storage + Indices
+    # ========================================================
+
+    def _store_note(self, note: Note) -> None:
         """
-        Generate summary from conversation (Phase-1: simple extraction).
-        
-        Args:
-            messages: Conversation messages
-        
-        Returns:
-            Summary text or None
+        Note को memory + indices + disk (optional) में डालता है।
+        साथ में simple pruning भी करता है।
         """
-        if len(messages) < 3:
-            return None
-        
-        # Extract important sentences
-        important_parts = []
-        
-        for msg in messages:
-            content = msg.get("content", "")
-            importance = self._calculate_importance(content)
-            
-            if importance > 0.6:
-                # Take first sentence
-                sentences = content.split('.')
-                if sentences:
-                    important_parts.append(sentences[0].strip())
-        
-        if important_parts:
-            summary = "Conversation summary: " + "; ".join(important_parts[:3])
-            return summary
-        
-        return None
-    
-    # ========================================================================
-    # INTERNAL HELPERS - INDEX MANAGEMENT
-    # ========================================================================
-    
-    def _update_indexes(self, note: Note) -> None:
-        """Update indexes with note information."""
-        # Category index
-        if note.category not in self.category_index:
-            self.category_index[note.category] = set()
-        self.category_index[note.category].add(note.id)
-        
-        # Tag index
-        for tag in note.tags:
-            tag_lower = tag.lower()
-            if tag_lower not in self.tag_index:
-                self.tag_index[tag_lower] = set()
-            self.tag_index[tag_lower].add(note.id)
-    
-    def _remove_from_indexes(self, note: Note) -> None:
-        """Remove note from indexes."""
-        # Category index
-        if note.category in self.category_index:
-            self.category_index[note.category].discard(note.id)
-        
-        # Tag index
-        for tag in note.tags:
-            tag_lower = tag.lower()
-            if tag_lower in self.tag_index:
-                self.tag_index[tag_lower].discard(note.id)
-    
-    def _prune_notes(self) -> None:
-        """Remove low importance notes when limit reached."""
-        if len(self.notes) < self.config["max_notes"]:
+        if len(self._notes) >= self.config.max_notes:
+            self._prune_low_importance()
+
+        self._notes[note.id] = note
+        self._add_to_indices(note)
+
+        if self.config.auto_save:
+            self._save_to_disk()
+
+    def _add_to_indices(self, note: Note) -> None:
+        """
+        Category और tags indices update करता है।
+        """
+        cat = _validate_category(note.category)
+        if cat not in self._category_index:
+            self._category_index[cat] = set()
+        self._category_index[cat].add(note.id)
+
+        for tag in _sanitize_tags(note.tags):
+            if tag not in self._tag_index:
+                self._tag_index[tag] = set()
+            self._tag_index[tag].add(note.id)
+
+    def _remove_from_indices(self, note: Note) -> None:
+        """
+        Note को indices से निकालता है।
+        """
+        cat = _validate_category(note.category)
+        if cat in self._category_index:
+            self._category_index[cat].discard(note.id)
+            if not self._category_index[cat]:
+                del self._category_index[cat]
+
+        for tag in _sanitize_tags(note.tags):
+            if tag in self._tag_index:
+                self._tag_index[tag].discard(note.id)
+                if not self._tag_index[tag]:
+                    del self._tag_index[tag]
+
+    def _save_to_disk(self) -> None:
+        """
+        सारे notes को single JSON file में dump करता है।
+        """
+        try:
+            notes_file = self._storage_path / "notes_phase1.json"
+            payload = {
+                "saved_at": datetime.now().isoformat(),
+                "notes": {nid: n.to_dict() for nid, n in self._notes.items()},
+            }
+            with notes_file.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            logger.error("AutoNotes save_to_disk error: %s", exc)
+
+    def _load_from_disk(self) -> None:
+        """
+        Disk से notes load करता है (अगर file मौजूद हो)।
+        """
+        try:
+            notes_file = self._storage_path / "notes_phase1.json"
+            if not notes_file.exists():
+                return
+
+            with notes_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            notes_raw = data.get("notes", {})
+            for nid, nd in notes_raw.items():
+                try:
+                    note = Note(
+                        id=str(nd.get("id", nid)),
+                        content=str(nd.get("content", "")),
+                        category=_validate_category(nd.get("category", "general")),
+                        importance=_validate_importance(
+                            float(nd.get("importance", 0.5))
+                        ),
+                        tags=_sanitize_tags(nd.get("tags", [])),
+                        source=_validate_source(nd.get("source", "unknown")),
+                        timestamp=datetime.fromisoformat(
+                            nd.get("timestamp", datetime.now().isoformat())
+                        ),
+                    )
+                    self._notes[note.id] = note
+                    self._add_to_indices(note)
+                except Exception as inner_exc:
+                    logger.warning(
+                        "Skipping invalid note from file: %s", inner_exc
+                    )
+        except Exception as exc:
+            logger.error("AutoNotes load_from_disk error: %s", exc)
+
+    def _prune_low_importance(self) -> None:
+        """
+        max_notes limit cross होने पर lowest-importance notes prune करता है।
+        """
+        if not self._notes:
             return
-        
-        # Sort by importance (ascending)
-        sorted_notes = sorted(
-            self.notes.items(),
-            key=lambda x: x[1].importance
-        )
-        
-        # Remove bottom 10%
-        remove_count = max(1, len(self.notes) // 10)
-        
-        for note_id, note in sorted_notes[:remove_count]:
-            self.delete_note(note_id)
-        
-        self.logger.info(f"Pruned {remove_count} low-importance notes")
-    
-    # ========================================================================
-    # ASYNC API (Future-ready)
-    # ========================================================================
-    
-    async def capture_from_text_async(
-        self,
-        text: str,
-        source: str = "conversation"
-    ) -> Optional[str]:
-        """Async version of capture_from_text."""
-        return await asyncio.to_thread(
-            self.capture_from_text, text, source
-        )
-    
-    async def search_async(
-        self,
-        query: str,
-        category: Optional[str] = None,
-        limit: int = 10
-    ) -> List[Note]:
-        """Async version of search."""
-        return await asyncio.to_thread(
-            self.search, query, category, 0.0, limit
+
+        sorted_items: List[Tuple[str, Note]] = sorted(
+            self._notes.items(),
+            key=lambda item: (item[1].importance, item[1].timestamp),
         )
 
+        remove_count = max(1, len(sorted_items) // 10)
+        to_remove = sorted_items[:remove_count]
 
-# ============================================================================
-# FACTORY PATTERN (Dependency Injection)
-# ============================================================================
+        for nid, note in to_remove:
+            self._remove_from_indices(note)
+            del self._notes[nid]
 
-def create_auto_notes(
-    config: Optional[NotesConfig] = None,
-    logger: Optional[logging.Logger] = None
-) -> AutoNotes:
+        logger.info("AutoNotes: pruned %d low-importance notes.", remove_count)
+
+
+# ============================================================
+# Public Helper: Simple factory
+# ============================================================
+
+def create_auto_notes_with_defaults() -> AutoNotes:
     """
-    Factory function to create AutoNotes instance.
-    
-    Args:
-        config: Optional notes configuration
-        logger: Optional logger instance
-    
-    Returns:
-        Configured AutoNotes instance
-    
-    Example:
-        >>> notes = create_auto_notes({"max_notes": 10000})
+    Phase‑1 friendly factory:
+    default config के साथ AutoNotes instance देता है।
     """
-    if config is None:
-        config = {
-            "storage_path": "./data/auto_notes",
-            "auto_save": True,
-            "max_notes": 5000,
-            "enable_auto_tagging": True,
-            "importance_threshold": 0.3
-        }
-    
-    return AutoNotes(
-        storage_path=config["storage_path"],
-        auto_save=config["auto_save"],
-        max_notes=config["max_notes"],
-        enable_auto_tagging=config["enable_auto_tagging"],
-        importance_threshold=config["importance_threshold"],
-        logger=logger
-    )
+    return AutoNotes(AutoNotesConfig())
 
 
-# ============================================================================
-# MODULE EXPORTS
-# ============================================================================
+# ============================================================
+# Module exports
+# ============================================================
 
 __all__ = [
-    "AutoNotes",
+    "AutoNotesConfig",
     "Note",
-    "NoteDict",
-    "NotesConfig",
-    "create_auto_notes"
+    "AutoNotes",
+    "create_auto_notes_with_defaults",
 ]
 
-
-# ============================================================================
-# TODO: FUTURE MODEL INTEGRATION (Phase-2+)
-# ============================================================================
-
-# TODO: Integrate Mistral-7B for:
-# - Semantic importance detection
-# - Intelligent summarization
-# - Entity and concept extraction
-# - Automatic categorization
-# - Context-aware tagging
-
-# TODO: Add note linking and relationship detection
-
-# TODO: Implement smart note merging (duplicate detection)
-
-# TODO: Add export to markdown/PDF formats
-
-# TODO: Implement collaborative note-taking features
+# End of File: memory/auto_notes.py (Phase‑1, 500+ lines approx with comments)
