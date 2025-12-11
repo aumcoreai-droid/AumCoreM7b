@@ -1,711 +1,484 @@
 """
-Long-Term Memory Module for AumCore_AI
+AumCore_AI Memory Subsystem - Long Term Memory Module
+Phase 1 Only (Chunk 1 + Chunk 2)
 
-This module manages persistent storage and retrieval of conversation history
-and learned user preferences across sessions.
+File: memory/long_term_memory.py
 
-Phase-1: Rule-based implementation with file-based storage.
-Future: Integration with Mistral-7B for semantic indexing and retrieval.
+Description:
+    यह module Phase‑1 में simple, rule-based, in-memory
+    long-term memory storage देता है।
 
-File: core/memory/long_term_memory.py
+    Core Idea (Phase‑1):
+        - Important, reusable information को structured entries के रूप में store करना।
+        - कोई DB, vector store, या model-based retention नहीं।
+        - Deterministic rules से decide करना कि क्या long-term memory बनना चाहिए।
+
+    Future (Phase‑3+):
+        - Persistent DB / KV store integration
+        - Priority-based decay and promotion
+        - Semantic grouping and linking
 """
 
-import asyncio
-import json
+# ============================================================
+# ✅ Chunk 1: Imports (PEP8)
+# ============================================================
+
 import logging
-import os
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
-from uuid import uuid4
-
-# Type annotations
-from typing import TypedDict
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 
-# ============================================================================
-# CONFIGURATION & TYPES
-# ============================================================================
+# ============================================================
+# ✅ Chunk 1: Local Logger Setup
+# ============================================================
 
-class MemoryEntryDict(TypedDict):
-    """Type definition for a memory entry."""
-    id: str
-    content: str
-    category: str
-    timestamp: datetime
-    importance: float
-    metadata: Dict[str, Any]
-
-
-class LongTermConfig(TypedDict):
-    """Configuration for long-term memory."""
-    storage_path: str
-    max_entries: int
-    auto_save: bool
-    compression_enabled: bool
+def get_ltm_logger(name: str = "AumCoreAI.Memory.LongTerm") -> logging.Logger:
+    """
+    Long-term memory module के लिए local logger।
+    """
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "[%(asctime)s] [LONG_TERM_MEMORY] [%(levelname)s] %(message)s"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
 
 
-# ============================================================================
-# ABSTRACT INTERFACES (SOLID: Dependency Inversion)
-# ============================================================================
-
-class PersistentStorageProtocol(Protocol):
-    """Protocol for persistent storage backends."""
-    
-    def save(self, data: Dict[str, Any]) -> None:
-        """Save data to storage."""
-        ...
-    
-    def load(self) -> Dict[str, Any]:
-        """Load data from storage."""
-        ...
-    
-    def delete(self, key: str) -> None:
-        """Delete specific entry."""
-        ...
+logger = get_ltm_logger()
 
 
-# ============================================================================
-# DATA MODELS
-# ============================================================================
+# ============================================================
+# ✅ Chunk 2: Data Structures (Rule-Based Models)
+# ============================================================
 
 @dataclass
-class MemoryEntry:
-    """Represents a single long-term memory entry."""
-    
-    id: str = field(default_factory=lambda: str(uuid4()))
-    content: str = ""
-    category: str = "general"
-    timestamp: datetime = field(default_factory=datetime.now)
-    importance: float = 0.5  # 0.0 to 1.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    access_count: int = 0
-    last_accessed: Optional[datetime] = None
-    
+class LongTermMemoryConfig:
+    """
+    Long-term memory के लिए Phase‑1 configuration।
+    """
+
+    max_entries: int = 2_000
+    min_importance_for_promotion: float = 0.6
+    min_seen_count_for_promotion: int = 2
+    default_ttl_days: int = 365  # सिर्फ informational, hard enforcement नहीं
+    max_text_length: int = 5_000
+
     def __post_init__(self) -> None:
-        """Validate entry after initialization."""
-        if not self.content:
-            raise ValueError("Content cannot be empty")
-        if not 0.0 <= self.importance <= 1.0:
-            raise ValueError("Importance must be between 0.0 and 1.0")
-        if not self.category:
-            raise ValueError("Category cannot be empty")
-    
-    def to_dict(self) -> MemoryEntryDict:
-        """Convert to dictionary format."""
-        return {
-            "id": self.id,
-            "content": self.content,
-            "category": self.category,
-            "timestamp": self.timestamp,
-            "importance": self.importance,
-            "metadata": self.metadata
-        }
-    
-    def increment_access(self) -> None:
-        """Increment access counter and update last accessed time."""
-        self.access_count += 1
-        self.last_accessed = datetime.now()
+        if self.max_entries <= 0:
+            raise ValueError("max_entries positive होना चाहिए।")
+        if not (0.0 <= self.min_importance_for_promotion <= 1.0):
+            raise ValueError("min_importance_for_promotion 0.0–1.0 के बीच होना चाहिए।")
+        if self.min_seen_count_for_promotion <= 0:
+            raise ValueError("min_seen_count_for_promotion positive होना चाहिए।")
+        if self.default_ttl_days <= 0:
+            raise ValueError("default_ttl_days positive होना चाहिए।")
+        if self.max_text_length <= 0:
+            raise ValueError("max_text_length positive होना चाहिए।")
 
 
-# ============================================================================
-# CORE LONG-TERM MEMORY CLASS
-# ============================================================================
-
-class LongTermMemory:
+@dataclass
+class LongTermMemoryEntry:
     """
-    Manages persistent long-term memory across sessions.
-    
+    Long-term memory में store होने वाली एक entry।
+
+    Fields:
+        id: unique identifier (string, external or auto-generated)
+        content: human-readable text content
+        category: optional category (e.g., "user_preference", "fact", "rule")
+        importance: 0.0–1.0 (Phase‑1 rule-based मान)
+        created_at: कब create हुआ
+        last_accessed_at: last retrieval/update समय
+        seen_count: कितनी बार access/observe हुआ
+        metadata: अतिरिक्त key-value pairs (Phase‑1 simple)
+    """
+
+    id: str
+    content: str
+    category: str = "general"
+    importance: float = 0.5
+    created_at: datetime = field(default_factory=datetime.now)
+    last_accessed_at: datetime = field(default_factory=datetime.now)
+    seen_count: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.id, str) or not self.id.strip():
+            raise ValueError("LongTermMemoryEntry.id non-empty string होना चाहिए।")
+        if not isinstance(self.content, str) or not self.content.strip():
+            raise ValueError("LongTermMemoryEntry.content non-empty string होना चाहिए।")
+        if not (0.0 <= self.importance <= 1.0):
+            raise ValueError("importance 0.0–1.0 के बीच होना चाहिए।")
+        if self.seen_count < 0:
+            raise ValueError("seen_count negative नहीं होना चाहिए।")
+
+
+# ============================================================
+# ✅ Chunk 2: Sanitization + Validation Utilities
+# ============================================================
+
+def _sanitize_text(text: str, max_len: int) -> str:
+    """
+    Content के लिए simple sanitization।
+    """
+    if text is None:
+        return ""
+    t = str(text).strip()
+    if len(t) > max_len:
+        t = t[:max_len].rstrip()
+    return t
+
+
+def _sanitize_category(category: Optional[str]) -> str:
+    """
+    Category field normalization।
+    """
+    if category is None:
+        return "general"
+    c = str(category).strip()
+    return c if c else "general"
+
+
+def _clamp_importance(value: float) -> float:
+    """
+    Importance को 0.0–1.0 में clamp करता है।
+    """
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+# ============================================================
+# ✅ Core Class: LongTermMemoryStore (Phase‑1)
+# ============================================================
+
+class LongTermMemoryStore:
+    """
+    Phase‑1 compatible long-term memory store।
+
     Features:
-    - Persistent file-based storage
-    - Category-based organization
-    - Importance-weighted retrieval
-    - Auto-save capabilities
-    - Search and filtering
-    - Access pattern tracking
-    
-    Attributes:
-        config: Memory configuration
-        entries: Dictionary of memory entries by ID
-        storage_path: Path to storage directory
-        logger: Centralized logger instance
-    
-    Example:
-        >>> memory = LongTermMemory(storage_path="./data/memory")
-        >>> memory.add_entry("User prefers Python", category="preference")
-        >>> results = memory.search("Python")
+        - In-memory dict-based storage
+        - Deterministic promotion rules (importance + seen_count)
+        - Simple retrieval filters
+        - Basic maintenance (pruning by importance)
     """
-    
-    def __init__(
-        self,
-        storage_path: str = "./data/long_term_memory",
-        max_entries: int = 10000,
-        auto_save: bool = True,
-        compression_enabled: bool = False,
-        logger: Optional[logging.Logger] = None
-    ) -> None:
-        """
-        Initialize long-term memory.
-        
-        Args:
-            storage_path: Directory path for persistent storage
-            max_entries: Maximum number of entries to retain
-            auto_save: Automatically save after modifications
-            compression_enabled: Enable storage compression
-            logger: Optional logger instance
-        
-        Raises:
-            ValueError: If parameters are invalid
-        """
-        # Validation
-        if max_entries <= 0:
-            raise ValueError("max_entries must be positive")
-        
-        # Configuration
-        self.config: LongTermConfig = {
-            "storage_path": storage_path,
-            "max_entries": max_entries,
-            "auto_save": auto_save,
-            "compression_enabled": compression_enabled
-        }
-        
-        # Storage
-        self.storage_path = Path(storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-        
-        # Memory entries: {id: MemoryEntry}
-        self.entries: Dict[str, MemoryEntry] = {}
-        
-        # Logging
-        self.logger = logger or self._setup_logger()
-        
-        # Load existing memories
-        self._load_from_disk()
-        
-        self.logger.info(
-            f"LongTermMemory initialized: path={storage_path}, "
-            f"entries={len(self.entries)}"
-        )
-    
-    def _setup_logger(self) -> logging.Logger:
-        """Setup centralized logger (Phase-1 fallback)."""
-        logger = logging.getLogger("aumcore.memory.long_term")
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-            logger.setLevel(logging.INFO)
-        return logger
-    
-    # ========================================================================
-    # PUBLIC API - WRITE OPERATIONS
-    # ========================================================================
-    
-    def add_entry(
+
+    def __init__(self, config: Optional[LongTermMemoryConfig] = None) -> None:
+        self.config: LongTermMemoryConfig = config or LongTermMemoryConfig()
+        self._entries: Dict[str, LongTermMemoryEntry] = {}
+
+        logger.debug("LongTermMemoryStore initialized with config: %r", self.config)
+
+    # --------------------------------------------------------
+    # Public API: Promotion Decision
+    # --------------------------------------------------------
+
+    def should_promote(
         self,
         content: str,
-        category: str = "general",
-        importance: float = 0.5,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """
-        Add a new memory entry.
-        
-        Args:
-            content: Memory content
-            category: Category classification
-            importance: Importance score (0.0-1.0)
-            metadata: Optional metadata dictionary
-        
-        Returns:
-            Entry ID
-        
-        Raises:
-            ValueError: If content is invalid
-        
-        Example:
-            >>> entry_id = memory.add_entry("User likes Python", "preference", 0.8)
-        """
-        try:
-            # Input validation
-            sanitized_content = self._sanitize_input(content)
-            
-            entry = MemoryEntry(
-                content=sanitized_content,
-                category=category,
-                importance=importance,
-                metadata=metadata or {}
-            )
-            
-            # Check max entries limit
-            if len(self.entries) >= self.config["max_entries"]:
-                self._prune_low_importance()
-            
-            self.entries[entry.id] = entry
-            
-            self.logger.debug(f"Added entry: id={entry.id}, category={category}")
-            
-            # Auto-save
-            if self.config["auto_save"]:
-                self._save_to_disk()
-            
-            return entry.id
-        
-        except Exception as e:
-            self.logger.error(f"Error adding entry: {e}")
-            raise
-    
-    def update_entry(
-        self,
-        entry_id: str,
-        content: Optional[str] = None,
-        category: Optional[str] = None,
-        importance: Optional[float] = None,
-        metadata: Optional[Dict[str, Any]] = None
+        importance: float,
+        seen_count: int,
     ) -> bool:
         """
-        Update an existing memory entry.
-        
-        Args:
-            entry_id: Entry ID to update
-            content: New content (optional)
-            category: New category (optional)
-            importance: New importance (optional)
-            metadata: New metadata (optional)
-        
-        Returns:
-            True if updated, False if not found
-        
-        Example:
-            >>> memory.update_entry(entry_id, importance=0.9)
+        Rule-based decision कि दिया हुआ content long-term memory के लायक है या नहीं।
+
+        Rules (Phase‑1):
+            - importance >= min_importance_for_promotion
+            - seen_count >= min_seen_count_for_promotion
         """
-        if entry_id not in self.entries:
-            self.logger.warning(f"Entry not found: {entry_id}")
-            return False
-        
-        entry = self.entries[entry_id]
-        
-        if content is not None:
-            entry.content = self._sanitize_input(content)
-        if category is not None:
-            entry.category = category
-        if importance is not None:
-            entry.importance = max(0.0, min(1.0, importance))
-        if metadata is not None:
-            entry.metadata.update(metadata)
-        
-        if self.config["auto_save"]:
-            self._save_to_disk()
-        
-        self.logger.debug(f"Updated entry: {entry_id}")
-        return True
-    
-    def delete_entry(self, entry_id: str) -> bool:
-        """
-        Delete a memory entry.
-        
-        Args:
-            entry_id: Entry ID to delete
-        
-        Returns:
-            True if deleted, False if not found
-        
-        Example:
-            >>> memory.delete_entry(entry_id)
-        """
-        if entry_id in self.entries:
-            del self.entries[entry_id]
-            
-            if self.config["auto_save"]:
-                self._save_to_disk()
-            
-            self.logger.debug(f"Deleted entry: {entry_id}")
-            return True
-        
-        return False
-    
-    # ========================================================================
-    # PUBLIC API - READ OPERATIONS
-    # ========================================================================
-    
-    def get_entry(self, entry_id: str) -> Optional[MemoryEntry]:
-        """
-        Retrieve a specific memory entry.
-        
-        Args:
-            entry_id: Entry ID to retrieve
-        
-        Returns:
-            MemoryEntry if found, None otherwise
-        
-        Example:
-            >>> entry = memory.get_entry(entry_id)
-        """
-        entry = self.entries.get(entry_id)
-        
-        if entry:
-            entry.increment_access()
-            if self.config["auto_save"]:
-                self._save_to_disk()
-        
-        return entry
-    
-    def search(
+        imp = _clamp_importance(importance)
+        return (
+            imp >= self.config.min_importance_for_promotion
+            and seen_count >= self.config.min_seen_count_for_promotion
+        )
+
+    # --------------------------------------------------------
+    # Public API: Add / Update Entries
+    # --------------------------------------------------------
+
+    def upsert_entry(
         self,
-        query: str,
+        entry_id: str,
+        content: str,
         category: Optional[str] = None,
-        min_importance: float = 0.0,
-        limit: int = 10
-    ) -> List[MemoryEntry]:
+        importance: float = 0.5,
+        metadata: Optional[Dict[str, Any]] = None,
+        seen_increment: int = 1,
+    ) -> LongTermMemoryEntry:
         """
-        Search memory entries by content.
-        
-        Args:
-            query: Search query string
-            category: Filter by category (optional)
-            min_importance: Minimum importance threshold
-            limit: Maximum number of results
-        
-        Returns:
-            List of matching memory entries
-        
-        Example:
-            >>> results = memory.search("Python", category="preference")
+        Long-term memory entry create या update करता है।
+
+        Behavior:
+            - अगर ID exist नहीं करता => नया entry create
+            - अगर ID already exist => content/importance/category/metadata update
+            - seen_count += seen_increment
         """
-        query_lower = query.lower()
-        
-        matches = []
-        for entry in self.entries.values():
-            # Category filter
-            if category and entry.category != category:
-                continue
-            
-            # Importance filter
-            if entry.importance < min_importance:
-                continue
-            
-            # Content match (Phase-1: simple substring)
-            if query_lower in entry.content.lower():
-                matches.append(entry)
-        
-        # Sort by importance (descending)
-        matches.sort(key=lambda e: e.importance, reverse=True)
-        
-        # Update access counts
-        for entry in matches[:limit]:
-            entry.increment_access()
-        
-        if self.config["auto_save"]:
-            self._save_to_disk()
-        
-        return matches[:limit]
-    
-    def get_by_category(
+        entry_id = str(entry_id).strip()
+        if not entry_id:
+            raise ValueError("entry_id empty नहीं हो सकता।")
+
+        cleaned_content = _sanitize_text(content, self.config.max_text_length)
+        if not cleaned_content:
+            raise ValueError("content empty नहीं हो सकता।")
+
+        cat = _sanitize_category(category)
+        imp = _clamp_importance(importance)
+        now = datetime.now()
+
+        existing = self._entries.get(entry_id)
+        if existing is None:
+            if len(self._entries) >= self.config.max_entries:
+                self._prune_low_importance()
+
+            entry = LongTermMemoryEntry(
+                id=entry_id,
+                content=cleaned_content,
+                category=cat,
+                importance=imp,
+                created_at=now,
+                last_accessed_at=now,
+                seen_count=max(0, seen_increment),
+                metadata=dict(metadata or {}),
+            )
+            self._entries[entry_id] = entry
+            logger.debug("LTM entry created: %s", entry_id)
+        else:
+            existing.content = cleaned_content
+            existing.category = cat
+            existing.importance = imp
+            existing.last_accessed_at = now
+            existing.seen_count = max(0, existing.seen_count + max(0, seen_increment))
+            if metadata:
+                existing.metadata.update(metadata)
+            entry = existing
+            logger.debug("LTM entry updated: %s", entry_id)
+
+        return entry
+
+    # --------------------------------------------------------
+    # Public API: Retrieval
+    # --------------------------------------------------------
+
+    def get_entry(self, entry_id: str) -> Optional[LongTermMemoryEntry]:
+        """
+        ID से entry retrieve करता है और last_accessed_at + seen_count update करता है।
+        """
+        entry = self._entries.get(entry_id)
+        if entry is None:
+            return None
+
+        entry.last_accessed_at = datetime.now()
+        entry.seen_count = max(0, entry.seen_count + 1)
+        return entry
+
+    def list_entries(self) -> List[LongTermMemoryEntry]:
+        """
+        सारे entries को list के रूप में return करता है (id sorted)।
+        """
+        entries = list(self._entries.values())
+        entries.sort(key=lambda e: e.id)
+        return entries
+
+    def find_by_category(
         self,
         category: str,
-        limit: Optional[int] = None
-    ) -> List[MemoryEntry]:
+        min_importance: float = 0.0,
+    ) -> List[LongTermMemoryEntry]:
         """
-        Retrieve all entries in a category.
-        
-        Args:
-            category: Category to filter
-            limit: Maximum number of results
-        
-        Returns:
-            List of memory entries
-        
-        Example:
-            >>> prefs = memory.get_by_category("preference")
+        Category और min importance के आधार पर entries filter करता है।
         """
-        matches = [
-            entry for entry in self.entries.values()
-            if entry.category == category
-        ]
-        
-        # Sort by timestamp (newest first)
-        matches.sort(key=lambda e: e.timestamp, reverse=True)
-        
-        if limit:
-            return matches[:limit]
-        return matches
-    
-    def get_most_important(self, limit: int = 10) -> List[MemoryEntry]:
-        """
-        Retrieve most important entries.
-        
-        Args:
-            limit: Number of entries to retrieve
-        
-        Returns:
-            List of memory entries sorted by importance
-        
-        Example:
-            >>> important = memory.get_most_important(5)
-        """
-        sorted_entries = sorted(
-            self.entries.values(),
-            key=lambda e: e.importance,
-            reverse=True
+        cat = _sanitize_category(category)
+        threshold = _clamp_importance(min_importance)
+
+        results: List[LongTermMemoryEntry] = []
+        for entry in self._entries.values():
+            if entry.category != cat:
+                continue
+            if entry.importance < threshold:
+                continue
+            results.append(entry)
+
+        results.sort(
+            key=lambda e: (e.importance, e.seen_count, e.last_accessed_at),
+            reverse=True,
         )
-        return sorted_entries[:limit]
-    
-    def get_statistics(self) -> Dict[str, Any]:
+        return results
+
+    def search_contains(
+        self,
+        text: str,
+        min_importance: float = 0.0,
+        limit: int = 20,
+    ) -> List[LongTermMemoryEntry]:
         """
-        Get memory statistics.
-        
-        Returns:
-            Dictionary with memory statistics
-        
-        Example:
-            >>> stats = memory.get_statistics()
+        Simple substring-based search (Phase‑1, no semantics)।
         """
-        if not self.entries:
-            return {
-                "total_entries": 0,
-                "categories": {},
-                "avg_importance": 0.0
-            }
-        
-        categories: Dict[str, int] = {}
-        for entry in self.entries.values():
-            categories[entry.category] = categories.get(entry.category, 0) + 1
-        
-        return {
-            "total_entries": len(self.entries),
-            "categories": categories,
-            "avg_importance": sum(e.importance for e in self.entries.values()) / len(self.entries),
-            "storage_path": str(self.storage_path),
-            "config": self.config.copy()
-        }
-    
-    # ========================================================================
-    # PERSISTENCE OPERATIONS
-    # ========================================================================
-    
-    def save(self) -> None:
+        query = _sanitize_text(text, self.config.max_text_length)
+        if not query:
+            return []
+
+        q_lower = query.lower()
+        threshold = _clamp_importance(min_importance)
+
+        matches: List[LongTermMemoryEntry] = []
+        for entry in self._entries.values():
+            if entry.importance < threshold:
+                continue
+            if q_lower in entry.content.lower():
+                matches.append(entry)
+
+        matches.sort(
+            key=lambda e: (e.importance, e.seen_count, e.last_accessed_at),
+            reverse=True,
+        )
+        return matches[: max(1, limit)]
+
+    # --------------------------------------------------------
+    # Public API: Delete / Maintenance
+    # --------------------------------------------------------
+
+    def delete_entry(self, entry_id: str) -> bool:
         """
-        Manually save memories to disk.
-        
-        Example:
-            >>> memory.save()
+        Entry remove करता है।
         """
-        self._save_to_disk()
-    
+        if entry_id in self._entries:
+            del self._entries[entry_id]
+            logger.debug("LTM entry deleted: %s", entry_id)
+            return True
+        return False
+
     def clear(self) -> None:
         """
-        Clear all memory entries.
-        
-        Example:
-            >>> memory.clear()
+        सारे entries clear करता है।
         """
-        count = len(self.entries)
-        self.entries.clear()
-        
-        if self.config["auto_save"]:
-            self._save_to_disk()
-        
-        self.logger.info(f"Cleared {count} memory entries")
-    
-    # ========================================================================
-    # ASYNC API (Future-ready)
-    # ========================================================================
-    
-    async def add_entry_async(
-        self,
-        content: str,
-        category: str = "general",
-        importance: float = 0.5,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
-        """Async version of add_entry."""
-        return await asyncio.to_thread(
-            self.add_entry, content, category, importance, metadata
-        )
-    
-    async def search_async(
-        self,
-        query: str,
-        category: Optional[str] = None,
-        limit: int = 10
-    ) -> List[MemoryEntry]:
-        """Async version of search."""
-        return await asyncio.to_thread(
-            self.search, query, category, 0.0, limit
-        )
-    
-    # ========================================================================
-    # INTERNAL HELPERS
-    # ========================================================================
-    
-    def _sanitize_input(self, content: str) -> str:
-        """Sanitize input content (Security)."""
-        if not isinstance(content, str):
-            raise ValueError("Content must be a string")
-        
-        sanitized = content.strip()
-        sanitized = sanitized.replace(' ', '')
-        
-        max_length = 50000
-        if len(sanitized) > max_length:
-            self.logger.warning(f"Content truncated from {len(sanitized)} to {max_length}")
-            sanitized = sanitized[:max_length]
-        
-        return sanitized
-    
-    def _save_to_disk(self) -> None:
-        """Save memories to disk storage."""
-        try:
-            storage_file = self.storage_path / "memories.json"
-            
-            # Convert entries to serializable format
-            data = {
-                "entries": {},
-                "metadata": {
-                    "saved_at": datetime.now().isoformat(),
-                    "version": "1.0"
-                }
-            }
-            
-            for entry_id, entry in self.entries.items():
-                data["entries"][entry_id] = {
-                    "id": entry.id,
-                    "content": entry.content,
-                    "category": entry.category,
-                    "timestamp": entry.timestamp.isoformat(),
-                    "importance": entry.importance,
-                    "metadata": entry.metadata,
-                    "access_count": entry.access_count,
-                    "last_accessed": entry.last_accessed.isoformat() if entry.last_accessed else None
-                }
-            
-            with open(storage_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-            
-            self.logger.debug(f"Saved {len(self.entries)} entries to disk")
-        
-        except Exception as e:
-            self.logger.error(f"Error saving to disk: {e}")
-    
-    def _load_from_disk(self) -> None:
-        """Load memories from disk storage."""
-        try:
-            storage_file = self.storage_path / "memories.json"
-            
-            if not storage_file.exists():
-                self.logger.info("No existing memory file found")
-                return
-            
-            with open(storage_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            for entry_id, entry_data in data.get("entries", {}).items():
-                entry = MemoryEntry(
-                    id=entry_data["id"],
-                    content=entry_data["content"],
-                    category=entry_data["category"],
-                    timestamp=datetime.fromisoformat(entry_data["timestamp"]),
-                    importance=entry_data["importance"],
-                    metadata=entry_data.get("metadata", {}),
-                    access_count=entry_data.get("access_count", 0),
-                    last_accessed=datetime.fromisoformat(entry_data["last_accessed"]) 
-                        if entry_data.get("last_accessed") else None
-                )
-                self.entries[entry_id] = entry
-            
-            self.logger.info(f"Loaded {len(self.entries)} entries from disk")
-        
-        except Exception as e:
-            self.logger.error(f"Error loading from disk: {e}")
-    
+        count = len(self._entries)
+        self._entries.clear()
+        logger.info("LongTermMemoryStore cleared, removed %d entries.", count)
+
     def _prune_low_importance(self) -> None:
-        """Remove low-importance entries when limit reached."""
-        if len(self.entries) < self.config["max_entries"]:
+        """
+        Max entries limit cross होने पर low-importance entries prune करता है।
+        Phase‑1 में basic rule:
+            - importance asc
+            - फिर seen_count asc
+        """
+        if not self._entries:
             return
-        
-        # Sort by importance (ascending)
-        sorted_entries = sorted(
-            self.entries.items(),
-            key=lambda x: x[1].importance
+
+        entries_sorted = sorted(
+            self._entries.values(),
+            key=lambda e: (e.importance, e.seen_count, e.last_accessed_at),
         )
-        
-        # Remove bottom 10%
-        remove_count = max(1, len(self.entries) // 10)
-        
-        for entry_id, _ in sorted_entries[:remove_count]:
-            del self.entries[entry_id]
-        
-        self.logger.info(f"Pruned {remove_count} low-importance entries")
 
+        remove_count = max(1, len(entries_sorted) // 10)
+        to_remove = entries_sorted[:remove_count]
 
-# ============================================================================
-# FACTORY PATTERN (Dependency Injection)
-# ============================================================================
+        for entry in to_remove:
+            del self._entries[entry.id]
 
-def create_long_term_memory(
-    config: Optional[LongTermConfig] = None,
-    logger: Optional[logging.Logger] = None
-) -> LongTermMemory:
-    """
-    Factory function to create LongTermMemory instance.
-    
-    Args:
-        config: Optional memory configuration
-        logger: Optional logger instance
-    
-    Returns:
-        Configured LongTermMemory instance
-    
-    Example:
-        >>> memory = create_long_term_memory({"storage_path": "./data"})
-    """
-    if config is None:
-        config = {
-            "storage_path": "./data/long_term_memory",
-            "max_entries": 10000,
-            "auto_save": True,
-            "compression_enabled": False
+        logger.info(
+            "LTM pruned %d low-importance entries (size=%d).",
+            remove_count,
+            len(self._entries),
+        )
+
+    # --------------------------------------------------------
+    # Public API: Simple Stats & Debug
+    # --------------------------------------------------------
+
+    def statistics(self) -> Dict[str, Any]:
+        """
+        Store के बारे में basic statistics देता है।
+        """
+        total = len(self._entries)
+        by_category: Dict[str, int] = {}
+
+        for entry in self._entries.values():
+            by_category[entry.category] = by_category.get(entry.category, 0) + 1
+
+        avg_importance = (
+            sum(e.importance for e in self._entries.values()) / total
+            if total > 0
+            else 0.0
+        )
+
+        return {
+            "total_entries": total,
+            "by_category": by_category,
+            "avg_importance": avg_importance,
+            "max_entries": self.config.max_entries,
         }
-    
-    return LongTermMemory(
-        storage_path=config["storage_path"],
-        max_entries=config["max_entries"],
-        auto_save=config["auto_save"],
-        compression_enabled=config["compression_enabled"],
-        logger=logger
-    )
+
+    def debug_snapshot(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        Debug के लिए कुछ entries का preview देता है।
+        """
+        entries = self.list_entries()[: max(1, limit)]
+        snapshot: List[Dict[str, Any]] = []
+
+        for e in entries:
+            snapshot.append(
+                {
+                    "id": e.id,
+                    "category": e.category,
+                    "importance": e.importance,
+                    "seen_count": e.seen_count,
+                    "created_at": e.created_at.isoformat(),
+                    "last_accessed_at": e.last_accessed_at.isoformat(),
+                    "content_preview": e.content[:120],
+                }
+            )
+
+        return snapshot
+
+    # --------------------------------------------------------
+    # Helper: TTL / Age check (Phase‑1 informational)
+    # --------------------------------------------------------
+
+    def is_entry_old(self, entry: LongTermMemoryEntry) -> bool:
+        """
+        Check करता है कि entry default TTL से पुरानी है या नहीं।
+        (Phase‑1 में सिर्फ informational, auto-delete नहीं करता)
+        """
+        ttl_delta = timedelta(days=self.config.default_ttl_days)
+        return datetime.now() - entry.created_at > ttl_delta
+
+    def list_old_entries(self) -> List[LongTermMemoryEntry]:
+        """
+        Default TTL से पुरानी entries की list देता है (informational).
+        """
+        return [
+            e for e in self._entries.values() if self.is_entry_old(e)
+        ]
 
 
-# ============================================================================
-# MODULE EXPORTS
-# ============================================================================
+# ============================================================
+# Public Factory Helper
+# ============================================================
+
+def create_default_long_term_memory_store() -> LongTermMemoryStore:
+    """
+    Default config के साथ LongTermMemoryStore instance देता है।
+    """
+    config = LongTermMemoryConfig()
+    return LongTermMemoryStore(config=config)
+
+
+# ============================================================
+# Module Exports
+# ============================================================
 
 __all__ = [
-    "LongTermMemory",
-    "MemoryEntry",
-    "MemoryEntryDict",
-    "LongTermConfig",
-    "create_long_term_memory"
+    "LongTermMemoryConfig",
+    "LongTermMemoryEntry",
+    "LongTermMemoryStore",
+    "create_default_long_term_memory_store",
 ]
 
-
-# ============================================================================
-# TODO: FUTURE MODEL INTEGRATION (Phase-2+)
-# ============================================================================
-
-# TODO: Integrate Mistral-7B for:
-# - Semantic search and retrieval
-# - Automatic importance scoring
-# - Content summarization for compression
-# - Entity extraction and linking
-# - Memory clustering by topic
-
-# TODO: Add vector database integration (FAISS/Chroma)
-
-# TODO: Implement memory consolidation (merging similar entries)
-
-# TODO: Add encryption for sensitive memories
+# End of File: memory/long_term_memory.py (Phase‑1, ~500 lines with comments)
