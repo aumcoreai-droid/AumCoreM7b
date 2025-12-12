@@ -1,6 +1,6 @@
 
-# new_memory_module.py
+# faiss_adapter.py
 # Auto-created from Google Colab
 
-def demo():
-    return "Memory module created successfully!"
+def test():
+    return "FAISS adapter created successfully!"
