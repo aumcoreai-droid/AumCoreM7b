@@ -1,0 +1,12 @@
+# Initial deployment file
+
+
+# RAG and Memory Enhancements
+chromadb
+qdrant-client
+
+# Qwen Coder Model Dependencies
+transformers
+torch
+accelerate
+peft
