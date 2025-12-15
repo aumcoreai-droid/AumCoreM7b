@@ -1,0 +1,1 @@
+# Placeholder file for rules_preferences_manager module\n# Add specific logic here later.\n

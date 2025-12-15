@@ -1,0 +1,1 @@
+# Placeholder file for short_term_memory module\n# Add specific logic here later.\n

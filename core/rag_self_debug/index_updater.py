@@ -1,0 +1,1 @@
+# Placeholder file for index_updater module\n# Add specific logic here later.\n

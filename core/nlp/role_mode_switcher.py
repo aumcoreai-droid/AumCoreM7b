@@ -1,0 +1,1 @@
+# Placeholder file for role_mode_switcher module\n# Add specific logic here later.\n

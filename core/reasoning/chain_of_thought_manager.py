@@ -1,0 +1,1 @@
+# Placeholder file for chain_of_thought_manager module\n# Add specific logic here later.\n

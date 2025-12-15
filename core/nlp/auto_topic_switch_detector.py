@@ -1,0 +1,1 @@
+# Placeholder file for auto_topic_switch_detector module\n# Add specific logic here later.\n

@@ -1,0 +1,1 @@
+# Placeholder file for faiss_adapter module\n# Add specific logic here later.\n
