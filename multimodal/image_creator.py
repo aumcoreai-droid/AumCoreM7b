@@ -1,0 +1,1 @@
+# Placeholder for image_creator module\n

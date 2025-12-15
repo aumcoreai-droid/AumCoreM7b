@@ -1,0 +1,1 @@
+# Placeholder for module_manager module\n
