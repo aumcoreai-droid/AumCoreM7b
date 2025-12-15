@@ -1,0 +1,11 @@
+torch
+transformers
+accelerate
+safetensors
+fastapi
+uvicorn[standard]
+Pillow
+sentence-transformers
+bitsandbytes
+scikit-learn
+gradio
