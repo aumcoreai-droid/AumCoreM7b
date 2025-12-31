@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+groq
+pymysql
+langdetect
+python-multipart
+psutil
+aiohttp
+pygments==2.18.0
+autopep8==2.3.0
+black==24.8.0
+markdown>=3.5

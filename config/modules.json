@@ -1,0 +1,35 @@
+{
+    "enabled_modules": ["orchestrator", "testing", "sys_diagnostics", "code_formatter", "prompt_manager", "code_intelligence", "code_reviewer"],
+    "auto_start": true,
+    "module_settings": {
+        "orchestrator": {
+            "enabled": true,
+            "background_tasks": true
+        },
+        "testing": {
+            "auto_test": false,
+            "test_on_startup": true
+        },
+        "sys_diagnostics": {
+            "auto_run": true,
+            "interval_minutes": 60
+        },
+        "code_formatter": {
+            "enabled": true,
+            "auto_format": true
+        },
+        "prompt_manager": {
+            "enabled": true,
+            "auto_optimize": true
+        },
+        "code_intelligence": {
+            "enabled": true,
+            "auto_analyze": true
+        },
+        "pro_code_reviewer": {
+            "enabled": true,
+            "auto_review": false,
+            "strict_mode": true
+        }
+    }
+}
