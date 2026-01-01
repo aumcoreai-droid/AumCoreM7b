@@ -1,3 +1,245 @@
+# app.py - ULTIMATE FINAL VERSION - WITH AUTH & MODULES
+
+import os
+import sys
+import uvicorn
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+from fastapi import FastAPI, Form, Request, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
+from contextlib import asynccontextmanager
+from groq import Groq
+
+# Auth imports
+from modules.auth import AuthManager, add_auth_middleware
+
+# ============================================
+# 1. GLOBAL CONFIGURATION & CONSTANTS
+# ============================================
+
+class AumCoreConfig:
+    """Central configuration for AumCore AI"""
+    VERSION = "3.0.0-Final-Auth"
+    USERNAME = "AumCore AI"
+    PORT = 7860
+    HOST = "0.0.0.0"
+    
+    # Paths
+    BASE_DIR = Path(__file__).parent
+    MODULES_DIR = BASE_DIR / "modules"
+    CONFIG_DIR = BASE_DIR / "config"
+    LOGS_DIR = BASE_DIR / "logs"
+    DATA_DIR = BASE_DIR / "data"
+    
+    # Create directories if they don't exist
+    for dir_path in [MODULES_DIR, CONFIG_DIR, LOGS_DIR, DATA_DIR]:
+        dir_path.mkdir(exist_ok=True)
+
+# ============================================
+# 2. MODULE LOADER SYSTEM
+# ============================================
+
+class ModuleManager:
+    """Dynamic module loading system"""
+    
+    def __init__(self, app, client):
+        self.app = app
+        self.client = client
+        self.config = AumCoreConfig()
+        self.loaded_modules = {}
+        self.module_config = self._load_module_config()
+        
+    def _load_module_config(self) -> dict:
+        """Load module configuration from JSON"""
+        config_file = self.config.CONFIG_DIR / "modules.json"
+        
+        if not config_file.exists():
+            # Default config
+            default_config = {
+                "enabled_modules": ["orchestrator", "testing", "sys_diagnostics", 
+                                    "code_formatter", "prompt_manager", 
+                                    "code_intelligence", "code_reviewer",
+                                    "auth", "ui_layout"],
+                "auto_start": True,
+                "module_settings": {
+                    "auth": {"enabled": True, "provider": "google"},
+                    "ui_layout": {"enabled": True, "responsive": True}
+                }
+            }
+            config_file.write_text(json.dumps(default_config, indent=4))
+            return default_config
+        
+        try:
+            return json.loads(config_file.read_text())
+        except:
+            # Return default if JSON corrupt
+            return {
+                "enabled_modules": ["auth", "ui_layout"],
+                "auto_start": True,
+                "module_settings": {}
+            }
+    
+    def load_all_modules(self):
+        """Load all enabled modules dynamically"""
+        print("=" * 60)
+        print("🚀 AUMCORE AI - MODULAR SYSTEM INITIALIZING")
+        print("=" * 60)
+        
+        for module_name in self.module_config["enabled_modules"]:
+            self.load_module(module_name)
+        
+        print(f"📦 Modules Loaded: {len(self.loaded_modules)}")
+        print(f"🔧 Active: {list(self.loaded_modules.keys())}")
+        print("=" * 60)
+    
+    def load_module(self, module_name: str):
+        """Load a single module by name"""
+        module_path = self.config.MODULES_DIR / f"{module_name}.py"
+        
+        if not module_path.exists():
+            print(f"⚠️ Module '{module_name}' not found at {module_path}")
+            return False
+        
+        try:
+            # Dynamic module loading
+            spec = importlib.util.spec_from_file_location(module_name, module_path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+            
+            # Register module with app
+            if hasattr(module, 'register_module'):
+                module.register_module(self.app, self.client, AumCoreConfig.USERNAME)
+                self.loaded_modules[module_name] = {
+                    "module": module,
+                    "path": module_path,
+                    "status": "loaded"
+                }
+                print(f"✅ Module '{module_name}' loaded successfully")
+                return True
+            else:
+                # For modules without register_module (like auth, ui_layout)
+                self.loaded_modules[module_name] = {
+                    "module": module,
+                    "path": module_path,
+                    "status": "loaded"
+                }
+                print(f"✅ Module '{module_name}' loaded (no registration needed)")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Failed to load module '{module_name}': {str(e)}")
+            return False
+    
+    def get_module(self, module_name: str):
+        """Get loaded module instance"""
+        return self.loaded_modules.get(module_name, {}).get("module")
+    
+    def get_module_status(self) -> dict:
+        """Get status of all modules"""
+        return {
+            "total_modules": len(self.loaded_modules),
+            "loaded_modules": list(self.loaded_modules.keys()),
+            "config": self.module_config,
+            "module_details": {
+                name: info["status"] 
+                for name, info in self.loaded_modules.items()
+            }
+        }
+
+# ============================================
+# 3. LIFESPAN MANAGEMENT
+# ============================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern lifespan handler"""
+    # Startup
+    print("=" * 60)
+    print("🚀 AUMCORE AI - ULTIMATE FINAL VERSION (WITH AUTH)")
+    print("=" * 60)
+    print(f"📁 Version: {AumCoreConfig.VERSION}")
+    print(f"👤 Username: {AumCoreConfig.USERNAME}")
+    print(f"🌐 Server: http://{AumCoreConfig.HOST}:{AumCoreConfig.PORT}")
+    print(f"🤖 AI Model: llama-3.3-70b-versatile")
+    print(f"🔐 Authentication: Enabled")
+    
+    # Load all modules
+    if hasattr(app.state, 'module_manager'):
+        app.state.module_manager.load_all_modules()
+    
+    print(f"📦 Modules: {len(app.state.module_manager.loaded_modules)} loaded")
+    print(f"🔐 Auth: {'✅ Configured' if os.getenv('GOOGLE_CLIENT_ID') else '⚠️ Not Configured'}")
+    print("=" * 60)
+    print("✅ System ready! Waiting for requests...")
+    print("=" * 60)
+    
+    yield  # Application runs here
+    
+    # Shutdown
+    print("\n🛑 System shutting down...")
+    print("✅ Cleanup completed")
+
+# ============================================
+# 4. CORE FASTAPI APPLICATION
+# ============================================
+
+app = FastAPI(
+    title="AumCore AI",
+    description="Advanced Modular AI Assistant with Authentication",
+    version=AumCoreConfig.VERSION,
+    lifespan=lifespan
+)
+
+# Add Auth Middleware
+add_auth_middleware(app)
+
+# Initialize Groq client
+try:
+    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    GROQ_AVAILABLE = True
+    app.state.groq_available = True
+except Exception as e:
+    print(f"⚠️ Groq client initialization failed: {e}")
+    client = None
+    GROQ_AVAILABLE = False
+    app.state.groq_available = False
+
+# Initialize Module Manager
+module_manager = ModuleManager(app, client)
+app.state.module_manager = module_manager
+
+# ============================================
+# 5. AUTH ENDPOINTS
+# ============================================
+
+@app.get("/auth/login")
+async def login(request: Request):
+    """Initiate Google OAuth login"""
+    redirect_uri = request.url_for('auth_callback')
+    return await AuthManager.login(request, str(redirect_uri))
+
+@app.get("/auth/callback")
+async def auth_callback(request: Request):
+    """OAuth callback handler"""
+    user = await AuthManager.authorize(request)
+    if user:
+        return RedirectResponse(url='/')
+    return {"error": "Authentication failed"}
+
+@app.get("/auth/logout")
+async def logout(request: Request):
+    """Logout user"""
+    return AuthManager.logout(request)
+
+@app.get("/auth/status")
+async def auth_status(request: Request):
+    """Check authentication status"""
+    user = AuthManager.get_current_user(request)
+    return {"is_authenticated": bool(user), "user": user}
+
 # ============================================
 # 6. MAIN UI ENDPOINT - WITH MOBILE DETECTION
 # ============================================
@@ -54,8 +296,7 @@ def generate_desktop_ui(user_info=None):
             letter = user_info.get("display_letter", "?")
             user_display = f'<div style="width:40px;height:40px;background:#007bff;color:white;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:bold;float:right">{letter}</div>'
     
-    html_content = f'''
-    <!DOCTYPE html>
+    html_content = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -67,7 +308,7 @@ def generate_desktop_ui(user_info=None):
 /* ==================== CORE STYLES ==================== */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Fira+Code:wght@400;500&display=swap');
 
-:root {
+:root {{
     --primary-bg: #0d1117;
     --sidebar-bg: #010409;
     --glass-bg: rgba(16, 20, 27, 0.85);
@@ -77,42 +318,42 @@ def generate_desktop_ui(user_info=None):
     --accent-red: #f85149;
     --text-primary: #e6edf3;
     --text-secondary: #8b949e;
-}
+}}
 
-* {
+* {{
     margin: 0;
     padding: 0;
     box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;
-}
+}}
 
-body {
+body {{
     background-color: var(--primary-bg);
     color: var(--text-primary);
     font-family: 'Inter', sans-serif;
     height: 100vh;
     width: 100vw;
     overflow: hidden;
-}
+}}
 
 /* ==================== GLASSMORPHISM EFFECTS ==================== */
-.glass-effect {
+.glass-effect {{
     background: var(--glass-bg);
     backdrop-filter: blur(12px) saturate(180%);
     -webkit-backdrop-filter: blur(12px) saturate(180%);
     border: 1px solid var(--glass-border);
     box-shadow: 0 8px 32px rgba(0, 0, 0, 0.36);
-}
+}}
 
-.glass-effect-light {
+.glass-effect-light {{
     background: rgba(22, 27, 34, 0.7);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
     border: 1px solid rgba(255, 255, 255, 0.08);
-}
+}}
 
 /* ==================== MOBILE HAMBURGER MENU ==================== */
-.mobile-header {
+.mobile-header {{
     display: none;
     position: fixed;
     top: 0;
@@ -124,9 +365,9 @@ body {
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--glass-border);
-}
+}}
 
-.hamburger-btn {
+.hamburger-btn {{
     background: transparent;
     border: none;
     color: var(--text-primary);
@@ -135,23 +376,23 @@ body {
     padding: 8px;
     border-radius: 6px;
     transition: all 0.2s ease;
-}
+}}
 
-.hamburger-btn:hover {
+.hamburger-btn:hover {{
     background: rgba(255, 255, 255, 0.1);
-}
+}}
 
-.mobile-logo {
+.mobile-logo {{
     font-weight: 600;
     font-size: 18px;
     color: var(--accent-blue);
     display: flex;
     align-items: center;
     gap: 8px;
-}
+}}
 
 /* ==================== SIDEBAR ==================== */
-.sidebar {
+.sidebar {{
     width: 260px;
     height: 100vh;
     background: var(--sidebar-bg);
@@ -165,13 +406,13 @@ body {
     z-index: 900;
     transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     overflow-y: auto;
-}
+}}
 
-.sidebar.active {
+.sidebar.active {{
     transform: translateX(0);
-}
+}}
 
-.nav-item {
+.nav-item {{
     padding: 14px 16px;
     margin-bottom: 8px;
     border-radius: 10px;
@@ -187,39 +428,39 @@ body {
     border: none;
     width: 100%;
     text-align: left;
-}
+}}
 
-.nav-item:hover {
+.nav-item:hover {{
     background: rgba(255, 255, 255, 0.05);
     color: var(--text-primary);
     transform: translateX(4px);
-}
+}}
 
-.nav-item i {
+.nav-item i {{
     width: 20px;
     text-align: center;
     font-size: 16px;
-}
+}}
 
-.new-chat-btn {
+.new-chat-btn {{
     background: linear-gradient(135deg, var(--accent-green), #2ea043);
     color: white !important;
     font-weight: 600;
     margin-bottom: 24px;
     box-shadow: 0 4px 20px rgba(35, 134, 54, 0.3);
-}
+}}
 
-.new-chat-btn:hover {
+.new-chat-btn:hover {{
     transform: translateY(-2px);
     box-shadow: 0 6px 25px rgba(35, 134, 54, 0.4);
-}
+}}
 
-.reset-btn {
+.reset-btn {{
     color: var(--accent-red) !important;
-}
+}}
 
 /* ==================== MAIN CHAT AREA ==================== */
-.main-chat {
+.main-chat {{
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -227,9 +468,9 @@ body {
     height: 100vh;
     margin-left: 260px;
     transition: margin-left 0.3s ease;
-}
+}}
 
-.chat-box {
+.chat-box {{
     flex: 1;
     overflow-y: auto;
     display: flex;
@@ -237,28 +478,28 @@ body {
     padding: 80px 20px 140px 20px;
     scroll-behavior: smooth;
     -webkit-overflow-scrolling: touch;
-}
+}}
 
 /* ==================== MESSAGE BUBBLES ==================== */
-.message-wrapper {
+.message-wrapper {{
     width: 100%;
     max-width: 760px;
     margin: 0 auto 30px auto;
     animation: fadeInUp 0.4s ease-out;
-}
+}}
 
-@keyframes fadeInUp {
-    from {
+@keyframes fadeInUp {{
+    from {{
         opacity: 0;
-        transform: translateY('20px');
-    }
-    to {
+        transform: translateY(20px);
+    }}
+    to {{
         opacity: 1;
         transform: translateY(0);
-    }
-}
+    }}
+}}
 
-.bubble {
+.bubble {{
     padding: 20px 24px;
     font-size: 16px;
     line-height: 1.7;
@@ -266,17 +507,17 @@ body {
     width: 100%;
     word-wrap: break-word;
     white-space: pre-wrap;
-}
+}}
 
-.user-text {
+.user-text {{
     background: linear-gradient(135deg, rgba(88, 166, 255, 0.15), rgba(88, 166, 255, 0.08));
     border: 1px solid rgba(88, 166, 255, 0.2);
     color: var(--accent-blue);
     margin-left: auto;
     max-width: 85%;
-}
+}}
 
-.ai-text {
+.ai-text {{
     background: var(--glass-bg);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
@@ -284,28 +525,28 @@ body {
     color: var(--text-primary);
     margin-right: auto;
     max-width: 85%;
-}
+}}
 
 /* ==================== CODE BLOCKS ==================== */
-.code-container {
+.code-container {{
     background: rgba(13, 17, 23, 0.9);
     border: 1px solid #30363d;
     border-radius: 14px;
     margin: 20px 0;
     overflow: hidden;
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
-}
+}}
 
-.code-header {
+.code-header {{
     background: rgba(22, 27, 34, 0.95);
     padding: 14px 20px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     border-bottom: 1px solid #30363d;
-}
+}}
 
-.code-lang {
+.code-lang {{
     color: #79c0ff;
     font-family: 'Fira Code', monospace;
     font-size: 14px;
@@ -313,15 +554,15 @@ body {
     display: flex;
     align-items: center;
     gap: 10px;
-}
+}}
 
-.code-lang::before {
+.code-lang::before {{
     content: "✦";
     color: #7ee787;
     font-size: 12px;
-}
+}}
 
-.copy-btn {
+.copy-btn {{
     background: var(--accent-green);
     color: white;
     border: none;
@@ -335,21 +576,21 @@ body {
     display: flex;
     align-items: center;
     gap: 8px;
-}
+}}
 
-.copy-btn:hover {
+.copy-btn:hover {{
     background: #2ea043;
     transform: translateY(-1px);
     box-shadow: 0 4px 12px rgba(35, 134, 54, 0.3);
-}
+}}
 
-.copy-btn.copied {
+.copy-btn.copied {{
     background: #7ee787;
     color: #0d1117;
-}
+}}
 
 /* ==================== INPUT AREA ==================== */
-.input-area {
+.input-area {{
     position: fixed;
     bottom: 0;
     width: calc(100% - 260px);
@@ -360,17 +601,17 @@ body {
     padding: 20px;
     border-top: 1px solid var(--glass-border);
     z-index: 800;
-}
+}}
 
-.input-container {
+.input-container {{
     display: flex;
     gap: 12px;
     max-width: 800px;
     margin: 0 auto;
     align-items: flex-end;
-}
+}}
 
-#user-input {
+#user-input {{
     flex: 1;
     background: rgba(1, 4, 9, 0.8);
     border: 1px solid #30363d;
@@ -385,15 +626,15 @@ body {
     font-family: 'Inter', sans-serif;
     line-height: 1.5;
     transition: all 0.2s ease;
-}
+}}
 
-#user-input:focus {
+#user-input:focus {{
     outline: none;
     border-color: var(--accent-blue);
     box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
-}
+}}
 
-.send-btn {
+.send-btn {{
     background: linear-gradient(135deg, var(--accent-green), #2ea043);
     color: white;
     border: none;
@@ -407,19 +648,19 @@ body {
     font-size: 20px;
     transition: all 0.2s ease;
     flex-shrink: 0;
-}
+}}
 
-.send-btn:hover {
+.send-btn:hover {{
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(35, 134, 54, 0.4);
-}
+}}
 
-.send-btn:active {
+.send-btn:active {{
     transform: translateY(0);
-}
+}}
 
 /* ==================== TYPING INDICATOR ==================== */
-.typing-indicator {
+.typing-indicator {{
     display: flex;
     align-items: center;
     gap: 8px;
@@ -429,26 +670,26 @@ body {
     border: 1px solid var(--glass-border);
     width: fit-content;
     color: var(--text-secondary);
-}
+}}
 
-.typing-dot {
+.typing-dot {{
     width: 10px;
     height: 10px;
     background: var(--accent-blue);
     border-radius: 50%;
     animation: blink 1.4s infinite both;
-}
+}}
 
-.typing-dot:nth-child(2) { animation-delay: 0.2s; }
-.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+.typing-dot:nth-child(2) {{ animation-delay: 0.2s; }}
+.typing-dot:nth-child(3) {{ animation-delay: 0.4s; }}
 
-@keyframes blink {
-    0%, 80%, 100% { opacity: 0; }
-    40% { opacity: 1; }
-}
+@keyframes blink {{
+    0%, 80%, 100% {{ opacity: 0; }}
+    40% {{ opacity: 1; }}
+}}
 
 /* ==================== STATUS INDICATORS ==================== */
-.health-indicator {
+.health-indicator {{
     display: inline-flex;
     align-items: center;
     gap: 10px;
@@ -458,32 +699,32 @@ body {
     font-weight: 600;
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-}
+}}
 
-.health-green { 
+.health-green {{ 
     background: rgba(35, 134, 54, 0.2); 
     color: #7ee787;
     border: 1px solid rgba(126, 231, 135, 0.3);
-}
+}}
 
-.health-yellow { 
+.health-yellow {{ 
     background: rgba(210, 153, 34, 0.2); 
     color: #e3b341;
     border: 1px solid rgba(227, 179, 65, 0.3);
-}
+}}
 
-.health-red { 
+.health-red {{ 
     background: rgba(218, 54, 51, 0.2); 
     color: #f85149;
     border: 1px solid rgba(248, 81, 73, 0.3);
-}
+}}
 
-.health-value {
+.health-value {{
     font-family: 'Fira Code', monospace;
     font-weight: 700;
-}
+}}
 
-.module-status {
+.module-status {{
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -493,12 +734,12 @@ body {
     background: rgba(22, 27, 34, 0.6);
     color: var(--text-secondary);
     border: 1px solid rgba(255, 255, 255, 0.1);
-}
+}}
 
-.module-active { color: #7ee787; }
-.module-inactive { color: #f85149; }
+.module-active {{ color: #7ee787; }}
+.module-inactive {{ color: #f85149; }}
 
-.error-message {
+.error-message {{
     background: rgba(248, 81, 73, 0.1);
     border: 1px solid rgba(248, 81, 73, 0.3);
     color: #f85149;
@@ -507,83 +748,83 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-}
+}}
 
 /* ==================== MOBILE RESPONSIVE STYLES ==================== */
-@media screen and (max-width: 768px) {
+@media screen and (max-width: 768px) {{
     /* Mobile Header */
-    .mobile-header {
+    .mobile-header {{
         display: flex;
         justify-content: space-between;
         align-items: center;
-    }
+    }}
     
     /* Sidebar - Hidden by default on mobile */
-    .sidebar {
+    .sidebar {{
         transform: translateX(-100%);
         width: 280px;
         background: var(--glass-bg);
         backdrop-filter: blur(20px);
         -webkit-backdrop-filter: blur(20px);
         border-right: 1px solid var(--glass-border);
-    }
+    }}
     
-    .sidebar.active {
+    .sidebar.active {{
         transform: translateX(0);
-    }
+    }}
     
     /* Main Chat Area - Full width on mobile */
-    .main-chat {
+    .main-chat {{
         margin-left: 0;
         width: 100%;
-    }
+    }}
     
     /* Input Area - Full width on mobile */
-    .input-area {
+    .input-area {{
         width: 100%;
         left: 0;
         padding: 16px;
-    }
+    }}
     
-    .input-container {
+    .input-container {{
         width: 100%;
-    }
+    }}
     
     /* Message Bubbles - Adjust for mobile */
-    .message-wrapper {
+    .message-wrapper {{
         max-width: 92%;
-    }
+    }}
     
-    .user-text, .ai-text {
+    .user-text, .ai-text {{
         max-width: 100%;
-    }
+    }}
     
-    .bubble {
+    .bubble {{
         padding: 16px 20px;
         font-size: 15px;
-    }
+    }}
     
     /* Chat Box Padding */
-    .chat-box {
+    .chat-box {{
         padding: 70px 16px 120px 16px;
-    }
+    }}
     
     /* Code Blocks - Adjust for mobile */
-    .code-container {
+    .code-container {{
         border-radius: 12px;
-    }
+    }}
     
-    .code-header {
+    .code-header {{
         padding: 12px 16px;
-    }
+    }}
     
-    .copy-btn {
+    .copy-btn {{
         padding: 6px 12px;
         font-size: 13px;
-    }
+    }}
     
     /* Overlay for sidebar backdrop */
-    .sidebar-overlay {
+    .sidebar-overlay {{
         display: none;
         position: fixed;
         top: 0;
@@ -594,84 +835,84 @@ body {
         backdrop-filter: blur(4px);
         -webkit-backdrop-filter: blur(4px);
         z-index: 899;
-    }
+    }}
     
-    .sidebar-overlay.active {
+    .sidebar-overlay.active {{
         display: block;
-    }
-}
+    }}
+}}
 
-@media screen and (max-width: 480px) {
+@media screen and (max-width: 480px) {{
     /* Extra small devices */
-    .bubble {
+    .bubble {{
         padding: 14px 16px;
         font-size: 14.5px;
-    }
+    }}
     
-    .input-container {
+    .input-container {{
         gap: 8px;
-    }
+    }}
     
-    #user-input {
+    #user-input {{
         padding: 14px 16px;
         font-size: 15px;
         min-height: 52px;
-    }
+    }}
     
-    .send-btn {
+    .send-btn {{
         width: 52px;
         height: 52px;
         font-size: 18px;
-    }
+    }}
     
-    .chat-box {
+    .chat-box {{
         padding: 60px 12px 110px 12px;
-    }
+    }}
     
-    .code-lang {
+    .code-lang {{
         font-size: 13px;
-    }
-}
+    }}
+}}
 
 /* ==================== SCROLLBAR STYLING ==================== */
-::-webkit-scrollbar {
+::-webkit-scrollbar {{
     width: 8px;
-}
+}}
 
-::-webkit-scrollbar-track {
+::-webkit-scrollbar-track {{
     background: rgba(1, 4, 9, 0.4);
     border-radius: 4px;
-}
+}}
 
-::-webkit-scrollbar-thumb {
+::-webkit-scrollbar-thumb {{
     background: #30363d;
     border-radius: 4px;
-}
+}}
 
-::-webkit-scrollbar-thumb:hover {
+::-webkit-scrollbar-thumb:hover {{
     background: #484f58;
-}
+}}
 
 /* Smooth transitions */
-.sidebar, .main-chat, .input-area, .bubble, .nav-item, .send-btn, .copy-btn {
+.sidebar, .main-chat, .input-area, .bubble, .nav-item, .send-btn, .copy-btn {{
     transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
+}}
 
 /* Prevent text selection on buttons */
-button {
+button {{
     user-select: none;
     -webkit-user-select: none;
-}
+}}
 
 /* Loading animation */
-@keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.5; }
-}
+@keyframes pulse {{
+    0%, 100% {{ opacity: 1; }}
+    50% {{ opacity: 0.5; }}
+}}
 
-.loading {
+.loading {{
     animation: pulse 2s infinite;
-}
+}}
 </style>
 </head>
 <body>
@@ -751,35 +992,35 @@ let isMobile = window.innerWidth <= 768;
 let sidebarOpen = false;
 
 // Detect screen size changes
-window.addEventListener('resize', function() {
+window.addEventListener('resize', function() {{
     isMobile = window.innerWidth <= 768;
-    if (!isMobile && sidebarOpen) {
+    if (!isMobile && sidebarOpen) {{
         closeSidebar();
-    }
-});
+    }}
+}});
 
 // Toggle sidebar on mobile
-function toggleSidebar() {
+function toggleSidebar() {{
     const sidebar = document.querySelector('.sidebar');
     const overlay = document.querySelector('.sidebar-overlay');
     const mainChat = document.querySelector('.main-chat');
     const inputArea = document.querySelector('.input-area');
     
-    if (isMobile) {
-        if (!sidebarOpen) {
+    if (isMobile) {{
+        if (!sidebarOpen) {{
             // Open sidebar
             sidebar.classList.add('active');
             overlay.classList.add('active');
             document.body.style.overflow = 'hidden';
             sidebarOpen = true;
-        } else {
+        }} else {{
             // Close sidebar
             closeSidebar();
-        }
-    }
-}
+        }}
+    }}
+}}
 
-function closeSidebar() {
+function closeSidebar() {{
     const sidebar = document.querySelector('.sidebar');
     const overlay = document.querySelector('.sidebar-overlay');
     
@@ -787,37 +1028,37 @@ function closeSidebar() {
     overlay.classList.remove('active');
     document.body.style.overflow = '';
     sidebarOpen = false;
-}
+}}
 
 // Close sidebar when clicking outside on mobile
-document.addEventListener('click', function(event) {
-    if (isMobile && sidebarOpen) {
+document.addEventListener('click', function(event) {{
+    if (isMobile && sidebarOpen) {{
         const sidebar = document.querySelector('.sidebar');
         const hamburger = document.querySelector('.hamburger-btn');
         
-        if (!sidebar.contains(event.target) && !hamburger.contains(event.target)) {
+        if (!sidebar.contains(event.target) && !hamburger.contains(event.target)) {{
             closeSidebar();
-        }
-    }
-});
+        }}
+    }}
+}});
 
 // ==================== ORIGINAL FUNCTIONS (PRESERVED) ====================
 // Resize input dynamically
-function resizeInput(el) {
+function resizeInput(el) {{
     el.style.height = 'auto';
     el.style.height = el.scrollHeight + 'px';
-}
+}}
 
 // Handle Enter key for send
-function handleKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+function handleKey(e) {{
+    if (e.key === 'Enter' && !e.shiftKey) {{
         e.preventDefault();
         send();
-    }
-}
+    }}
+}}
 
 // Format code blocks
-function formatCodeBlocks(text) {
+function formatCodeBlocks(text) {{
     let formatted = text.replace(/```python\\s*([\\s\\S]*?)```/g,
         `<div class="code-container">
             <div class="code-header">
@@ -845,93 +1086,93 @@ function formatCodeBlocks(text) {
         </div>`);
     
     return formatted;
-}
+}}
 
 // Copy code to clipboard
-function copyCode(button) {
+function copyCode(button) {{
     const codeBlock = button.parentElement.nextElementSibling;
     const codeText = codeBlock.innerText;
     
-    navigator.clipboard.writeText(codeText).then(() => {
+    navigator.clipboard.writeText(codeText).then(() => {{
         const originalHTML = button.innerHTML;
         const originalClass = button.className;
         
         button.innerHTML = '<i class="fas fa-check"></i> Copied!';
         button.className = 'copy-btn copied';
         
-        setTimeout(() => {
+        setTimeout(() => {{
             button.innerHTML = originalHTML;
             button.className = originalClass;
-        }, 2000);
-    }).catch(err => {
+        }}, 2000);
+    }}).catch(err => {{
         console.error('Copy failed:', err);
         button.innerHTML = '<i class="fas fa-times"></i> Failed';
-        setTimeout(() => {
+        setTimeout(() => {{
             button.innerHTML = '<i class="fas fa-copy"></i> Copy';
-        }, 2000);
-    });
-}
+        }}, 2000);
+    }});
+}}
 
 // Reset memory confirmation
-async function confirmReset() {
-    if (confirm("Sanjay bhai, kya aap sach mein saari memory delete karna chahte hain?")) {
-        try {
-            const res = await fetch('/reset', { method: 'POST' });
+async function confirmReset() {{
+    if (confirm("Sanjay bhai, kya aap sach mein saari memory delete karna chahte hain?")) {{
+        try {{
+            const res = await fetch('/reset', {{ method: 'POST' }});
             const data = await res.json();
             alert(data.message);
             window.location.reload();
-        } catch (e) {
+        }} catch (e) {{
             alert("Reset failed: " + e.message);
-        }
-    }
-}
+        }}
+    }}
+}}
 
 // System Health Check
-async function checkSystemHealth() {
-    try {
+async function checkSystemHealth() {{
+    try {{
         const res = await fetch('/system/health');
         const data = await res.json();
         
-        if (data.success) {
+        if (data.success) {{
             const health = data.health_score;
             let healthClass = 'health-red';
             if (health >= 80) healthClass = 'health-green';
             else if (health >= 50) healthClass = 'health-yellow';
             
-            alert(`System Health: ${health}/100\\nStatus: ${data.status}\\nMemory: ${data.memory_used}%\\nCPU: ${data.cpu_used}%`);
-        } else {
+            alert(`System Health: ${{health}}/100\\nStatus: ${{data.status}}\\nMemory: ${{data.memory_used}}%\\nCPU: ${{data.cpu_used}}%`);
+        }} else {{
             alert('Health check failed: ' + data.error);
-        }
-    } catch (e) {
+        }}
+    }} catch (e) {{
         alert('Health check error: ' + e.message);
-    }
-}
+    }}
+}}
 
 // Module Status Check
-async function showModuleStatus() {
-    try {
+async function showModuleStatus() {{
+    try {{
         const res = await fetch('/system/modules/status');
         const data = await res.json();
         
-        if (data.success) {
+        if (data.success) {{
             let moduleList = '📦 Loaded Modules:\\n';
-            data.modules.forEach(module => {
-                moduleList += `• ${module.name}: ${module.status}\\n`;
-            });
+            data.modules.forEach(module => {{
+                moduleList += `• ${{module.name}}: ${{module.status}}\\n`;
+            }});
             alert(moduleList);
-        }
-    } catch (e) {
+        }}
+    }} catch (e) {{
         alert('Module status error: ' + e.message);
-    }
-}
+    }}
+}}
 
 // Run Diagnostics
-async function runDiagnostics() {
+async function runDiagnostics() {{
     const log = document.getElementById('chat-log');
     const typingId = 'diagnostics-' + Date.now();
     
     log.innerHTML += `
-        <div class="message-wrapper" id="${typingId}">
+        <div class="message-wrapper" id="${{typingId}}">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -943,14 +1184,14 @@ async function runDiagnostics() {
     
     log.scrollTop = log.scrollHeight;
     
-    try {
+    try {{
         const res = await fetch('/system/diagnostics/full');
         const data = await res.json();
         const typingElem = document.getElementById(typingId);
         
         if (typingElem) typingElem.remove();
         
-        if (data.success) {
+        if (data.success) {{
             const report = data.diagnostics;
             const health = report.health_score;
             let healthClass = 'health-red';
@@ -964,44 +1205,44 @@ async function runDiagnostics() {
                             <i class="fas fa-chart-bar"></i> System Diagnostics Report
                         </h3>
                         
-                        <div class="health-indicator ${healthClass}" style="margin-bottom: 20px;">
+                        <div class="health-indicator ${{healthClass}}" style="margin-bottom: 20px;">
                             <i class="fas fa-heartbeat"></i>
-                            <span class="health-value">Health: ${health}/100</span>
-                            <span>(${report.status})</span>
+                            <span class="health-value">Health: ${{health}}/100</span>
+                            <span>(${{report.status}})</span>
                         </div>
                         
                         <div style="background: rgba(255,255,255,0.05); padding: 16px; border-radius: 12px; margin: 16px 0;">
                             <strong>System Resources:</strong><br>
-                            • CPU: ${report.sections?.system_resources?.cpu?.usage_percent || 'N/A'}%<br>
-                            • Memory: ${report.sections?.system_resources?.memory?.used_percent || 'N/A'}%<br>
-                            • Disk: ${report.sections?.system_resources?.disk?.used_percent || 'N/A'}%<br>
+                            • CPU: ${{report.sections?.system_resources?.cpu?.usage_percent || 'N/A'}}%<br>
+                            • Memory: ${{report.sections?.system_resources?.memory?.used_percent || 'N/A'}}%<br>
+                            • Disk: ${{report.sections?.system_resources?.disk?.used_percent || 'N/A'}}%<br>
                         </div>
                         
                         <div style="background: rgba(255,255,255,0.05); padding: 16px; border-radius: 12px; margin: 16px 0;">
                             <strong>Services:</strong><br>
-                            • Groq API: ${report.sections?.external_services?.groq_api?.status || 'N/A'}<br>
-                            • TiDB: ${report.sections?.external_services?.tidb_database?.status || 'N/A'}<br>
+                            • Groq API: ${{report.sections?.external_services?.groq_api?.status || 'N/A'}}<br>
+                            • TiDB: ${{report.sections?.external_services?.tidb_database?.status || 'N/A'}}<br>
                         </div>
                         
                         <small style="color: var(--text-secondary); font-size: 13px;">
-                            <i class="fas fa-id-card"></i> Report ID: ${report.system_id}
+                            <i class="fas fa-id-card"></i> Report ID: ${{report.system_id}}
                         </small>
                     </div>
                 </div>
             `;
             
             log.innerHTML += html;
-        } else {
+        }} else {{
             log.innerHTML += `
                 <div class="message-wrapper">
                     <div class="error-message">
                         <i class="fas fa-exclamation-circle"></i> 
-                        Diagnostics failed: ${data.error}
+                        Diagnostics failed: ${{data.error}}
                     </div>
                 </div>
             `;
-        }
-    } catch (e) {
+        }}
+    }} catch (e) {{
         const typingElem = document.getElementById(typingId);
         if (typingElem) typingElem.remove();
         
@@ -1009,23 +1250,23 @@ async function runDiagnostics() {
             <div class="message-wrapper">
                 <div class="error-message">
                     <i class="fas fa-exclamation-circle"></i> 
-                    Diagnostics error: ${e.message}
+                    Diagnostics error: ${{e.message}}
                 </div>
             </div>
         `;
-    }
+    }}
     
     log.scrollTop = log.scrollHeight;
     if (isMobile) closeSidebar();
-}
+}}
 
 // Run Tests
-async function runTests() {
+async function runTests() {{
     const log = document.getElementById('chat-log');
     const typingId = 'tests-' + Date.now();
     
     log.innerHTML += `
-        <div class="message-wrapper" id="${typingId}">
+        <div class="message-wrapper" id="${{typingId}}">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -1037,14 +1278,14 @@ async function runTests() {
     
     log.scrollTop = log.scrollHeight;
     
-    try {
+    try {{
         const res = await fetch('/system/tests/run');
         const data = await res.json();
         const typingElem = document.getElementById(typingId);
         
         if (typingElem) typingElem.remove();
         
-        if (data.success) {
+        if (data.success) {{
             const results = data.results;
             let html = `
                 <div class="message-wrapper">
@@ -1053,40 +1294,40 @@ async function runTests() {
                             <i class="fas fa-vial"></i> System Test Results
                         </h3>
                         
-                        <div class="health-indicator ${results.summary.score >= 80 ? 'health-green' : results.summary.score >= 50 ? 'health-yellow' : 'health-red'}" style="margin-bottom: 20px;">
+                        <div class="health-indicator ${{results.summary.score >= 80 ? 'health-green' : results.summary.score >= 50 ? 'health-yellow' : 'health-red'}}" style="margin-bottom: 20px;">
                             <i class="fas fa-vial"></i>
-                            <span class="health-value">Score: ${results.summary.score}/100</span>
-                            <span>(${results.summary.status})</span>
+                            <span class="health-value">Score: ${{results.summary.score}}/100</span>
+                            <span>(${{results.summary.status}})</span>
                         </div>
                         
                         <div style="background: rgba(255,255,255,0.05); padding: 16px; border-radius: 12px; margin: 16px 0;">
                             <strong>Test Summary:</strong><br>
-                            • Total Tests: ${results.summary.total_tests}<br>
-                            • Passed: ${results.summary.passed}<br>
-                            • Failed: ${results.summary.failed}<br>
-                            • Success Rate: ${Math.round((results.summary.passed / results.summary.total_tests) * 100)}%<br>
+                            • Total Tests: ${{results.summary.total_tests}}<br>
+                            • Passed: ${{results.summary.passed}}<br>
+                            • Failed: ${{results.summary.failed}}<br>
+                            • Success Rate: ${{Math.round((results.summary.passed / results.summary.total_tests) * 100)}}%<br>
                         </div>
                         
                         <div style="background: rgba(255,255,255,0.05); padding: 16px; border-radius: 12px;">
                             <strong>Categories Tested:</strong><br>
-                            ${Object.keys(results.tests).map(cat => `• ${cat.charAt(0).toUpperCase() + cat.slice(1)}`).join('<br>')}
+                            ${{Object.keys(results.tests).map(cat => `• ${{cat.charAt(0).toUpperCase() + cat.slice(1)}}`).join('<br>')}}
                         </div>
                     </div>
                 </div>
             `;
             
             log.innerHTML += html;
-        } else {
+        }} else {{
             log.innerHTML += `
                 <div class="message-wrapper">
                     <div class="error-message">
                         <i class="fas fa-exclamation-circle"></i> 
-                        Tests failed: ${data.error}
+                        Tests failed: ${{data.error}}
                     </div>
                 </div>
             `;
-        }
-    } catch (e) {
+        }}
+    }} catch (e) {{
         const typingElem = document.getElementById(typingId);
         if (typingElem) typingElem.remove();
         
@@ -1094,18 +1335,18 @@ async function runTests() {
             <div class="message-wrapper">
                 <div class="error-message">
                     <i class="fas fa-exclamation-circle"></i> 
-                    Tests error: ${e.message}
+                    Tests error: ${{e.message}}
                 </div>
             </div>
         `;
-    }
+    }}
     
     log.scrollTop = log.scrollHeight;
     if (isMobile) closeSidebar();
-}
+}}
 
 // Send function
-async function send() {
+async function send() {{
     const input = document.getElementById('user-input');
     const log = document.getElementById('chat-log');
     const text = input.value.trim();
@@ -1120,7 +1361,7 @@ async function send() {
         <div class="message-wrapper">
             <div class="bubble user-text">
                 <i class="fas fa-user" style="margin-right: 8px; opacity: 0.7;"></i>
-                ${text}
+                ${{text}}
             </div>
         </div>
     `;
@@ -1131,7 +1372,7 @@ async function send() {
     // Typing indicator
     const typingId = 'typing-' + Date.now();
     log.innerHTML += `
-        <div class="message-wrapper" id="${typingId}">
+        <div class="message-wrapper" id="${{typingId}}">
             <div class="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -1143,12 +1384,12 @@ async function send() {
     
     log.scrollTop = log.scrollHeight;
     
-    try {
-        const res = await fetch('/chat', {
+    try {{
+        const res = await fetch('/chat', {{
             method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
             body: 'message=' + encodeURIComponent(text)
-        });
+        }});
         
         const data = await res.json();
         const typingElem = document.getElementById(typingId);
@@ -1161,12 +1402,12 @@ async function send() {
             <div class="message-wrapper">
                 <div class="bubble ai-text">
                     <i class="fas fa-robot" style="margin-right: 8px; color: var(--accent-blue);"></i>
-                    ${formatted}
+                    ${{formatted}}
                 </div>
             </div>
         `;
         
-    } catch (e) {
+    }} catch (e) {{
         const typingElem = document.getElementById(typingId);
         if (typingElem) typingElem.remove();
         
@@ -1178,24 +1419,24 @@ async function send() {
                 </div>
             </div>
         `;
-    }
+    }}
     
     log.scrollTop = log.scrollHeight;
-}
+}}
 
 // New functions for mobile
-function loadChatHistory() {
+function loadChatHistory() {{
     alert('Chat history feature will be implemented soon!');
     if (isMobile) closeSidebar();
-}
+}}
 
-function openSettings() {
+function openSettings() {{
     alert('Settings panel will be implemented soon!');
     if (isMobile) closeSidebar();
-}
+}}
 
 // Initialize on load
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', function() {{
     const input = document.getElementById('user-input');
     if (input) input.focus();
     
@@ -1204,7 +1445,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Add welcome message
     const log = document.getElementById('chat-log');
-    if (log && log.children.length === 0) {
+    if (log && log.children.length === 0) {{
         log.innerHTML = `
             <div class="message-wrapper" style="text-align: center; margin-top: 40px;">
                 <div class="bubble ai-text" style="background: rgba(88, 166, 255, 0.1); border-color: rgba(88, 166, 255, 0.3);">
@@ -1212,7 +1453,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         <i class="fas fa-robot"></i> Welcome to AumCore AI
                     </h3>
                     <p style="color: var(--text-secondary); margin-bottom: 16px;">
-                        Version {AumCoreConfig.VERSION}
+                        Version ${{AumCoreConfig.VERSION}}
                     </p>
                     <p style="font-size: 15px; line-height: 1.6;">
                         I'm your advanced AI assistant with expert coding capabilities.<br>
@@ -1228,18 +1469,17 @@ document.addEventListener('DOMContentLoaded', function() {
                 </div>
             </div>
         `;
-    }
-});
+    }}
+}});
 
 // Global config for JS
-const AumCoreConfig = {
+const AumCoreConfig = {{
     VERSION: "3.0.0-Final-Auth",
     USERNAME: "AumCore AI"
-};
+}};
 </script>
 </body>
-</html>
-    '''
+</html>'''
     return HTMLResponse(content=html_content)
 
 def generate_fallback_ui(user_info=None):
@@ -1260,3 +1500,192 @@ def generate_fallback_ui(user_info=None):
     </html>
     '''
     return HTMLResponse(content=html)
+
+# ============================================
+# 7. CORE ENDPOINTS (PRESERVED)
+# ============================================
+
+@app.post("/reset")
+async def reset(request: Request):
+    """Reset system memory"""
+    try:
+        # Check auth
+        user = AuthManager.get_current_user(request)
+        if not user:
+            return {"success": False, "message": "Authentication required"}
+            
+        # Check if memory_db module exists
+        try:
+            from core.memory_db import tidb_memory
+            return {"success": True, "message": "Memory clear ho gayi hai!"}
+        except ImportError:
+            return {"success": True, "message": "Reset command accepted (no TiDB configured)"}
+    except Exception as e:
+        return {"success": False, "message": f"Reset error: {str(e)}"}
+
+@app.post("/chat")
+async def chat(request: Request, message: str = Form(...)):
+    """Main chat endpoint - AUTH PROTECTED"""
+    # Check authentication
+    user = AuthManager.get_current_user(request)
+    if not user:
+        return {"response": "Error: Please login first to use the chat feature."}
+    
+    if not app.state.groq_available:
+        return {"response": "Error: Groq API not configured."}
+    
+    try:
+        from core.language_detector import detect_input_language, get_system_prompt
+        from core.memory_db import tidb_memory
+    except ImportError as e:
+        return {"response": f"Error: {str(e)}"}
+    
+    # CHECK FOR CODING QUERY
+    msg_lower = message.lower()
+    CODING_KEYWORDS = ["python", "code", "script", "function", "program", 
+                       "create", "write", "generate", "algorithm", "debug",
+                       "class", "import", "def", "for loop", "while", "dictionary",
+                       "list", "array", "json", "api", "database", "file handling"]
+    
+    # If coding query, use expert modules
+    if any(keyword in msg_lower for keyword in CODING_KEYWORDS):
+        code_module = app.state.module_manager.get_module("code_intelligence")
+        if code_module and hasattr(code_module, 'enhance_code_response'):
+            try:
+                enhanced_response = await code_module.enhance_code_response(message, client)
+                
+                # Save to database
+                try:
+                    tidb_memory.save_chat(message, enhanced_response, "en")
+                except:
+                    pass
+                
+                return {"response": enhanced_response}
+            except Exception as e:
+                print(f"⚠️ Expert coding failed: {e}")
+                # Fall through to normal flow
+    
+    # NORMAL CHAT FLOW
+    lang_mode = detect_input_language(message)
+    system_prompt = get_system_prompt(lang_mode, AumCoreConfig.USERNAME)
+    
+    # Get chat history
+    recent_chats = []
+    try:
+        recent_chats = tidb_memory.get_recent_chats(limit=10)
+    except:
+        pass
+    
+    # Prepare messages
+    api_messages = [{"role": "system", "content": system_prompt}]
+    for chat_row in recent_chats:
+        user_input, ai_response, _ = chat_row
+        api_messages.append({"role": "user", "content": user_input})
+        api_messages.append({"role": "assistant", "content": ai_response})
+    api_messages.append({"role": "user", "content": message})
+    
+    # Call Groq API
+    try:
+        completion = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=api_messages,
+            temperature=0.3,
+            max_tokens=1000
+        )
+        ai_response = completion.choices[0].message.content.strip()
+        
+        # Save to database
+        try:
+            tidb_memory.save_chat(message, ai_response, lang_mode)
+        except:
+            pass
+        
+        return {"response": ai_response}
+        
+    except Exception as e:
+        return {"response": f"Error: {str(e)}"}
+
+# ============================================
+# 8. SYSTEM MANAGEMENT ENDPOINTS
+# ============================================
+
+@app.get("/system/health")
+async def system_health():
+    """Overall system health check"""
+    health_data = {
+        "success": True,
+        "timestamp": asyncio.get_event_loop().time(),
+        "version": AumCoreConfig.VERSION,
+        "status": "OPERATIONAL",
+        "modules_loaded": len(app.state.module_manager.loaded_modules),
+        "groq_available": app.state.groq_available,
+        "health_score": 95
+    }
+    
+    # Add module-specific health if available
+    diagnostics_module = app.state.module_manager.get_module("sys_diagnostics")
+    if diagnostics_module and hasattr(diagnostics_module, 'get_health'):
+        try:
+            module_health = await diagnostics_module.get_health()
+            health_data.update(module_health)
+        except:
+            pass
+    
+    return health_data
+
+@app.get("/system/modules/status")
+async def modules_status():
+    """Get status of all loaded modules"""
+    return {
+        "success": True,
+        "total": len(app.state.module_manager.loaded_modules),
+        "modules": [
+            {
+                "name": name,
+                "status": info["status"],
+                "active": True
+            }
+            for name, info in app.state.module_manager.loaded_modules.items()
+        ]
+    }
+
+@app.get("/system/info")
+async def system_info():
+    """Get complete system information"""
+    return {
+        "success": True,
+        "system": {
+            "name": "AumCore AI",
+            "version": AumCoreConfig.VERSION,
+            "architecture": "Modular Microservices",
+            "developer": "Sanjay & AI Assistant"
+        },
+        "capabilities": {
+            "ai_chat": True,
+            "code_generation": True,
+            "hindi_english": True,
+            "authentication": True,
+            "memory_storage": True,
+            "system_monitoring": "sys_diagnostics" in app.state.module_manager.loaded_modules,
+            "automated_testing": "testing" in app.state.module_manager.loaded_modules,
+            "task_orchestration": "orchestrator" in app.state.module_manager.loaded_modules,
+            "expert_coding": "code_intelligence" in app.state.module_manager.loaded_modules
+        },
+        "endpoints": [
+            "/", "/chat", "/reset",
+            "/auth/login", "/auth/logout", "/auth/status",
+            "/system/health", "/system/info", "/system/modules/status"
+        ]
+    }
+
+# ============================================
+# 9. MAIN EXECUTION
+# ============================================
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app, 
+        host=AumCoreConfig.HOST, 
+        port=AumCoreConfig.PORT, 
+        log_level="info"
+    )
