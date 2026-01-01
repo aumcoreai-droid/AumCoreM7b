@@ -36,7 +36,7 @@
             "enabled": true,
             "auto_analyze": true
         },
-        "pro_code_reviewer": {
+        "code_reviewer": {
             "enabled": true,
             "auto_review": false,
             "strict_mode": true
