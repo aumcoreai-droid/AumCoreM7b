@@ -1,4 +1,4 @@
-# app.py - UPDATED WITH ACTUAL DEPLOYED ENDPOINTS
+# app.py - ERROR FIXED VERSION
 
 import os
 import sys
@@ -1100,8 +1100,8 @@ async def orchestrate_task(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/system/titan/telemetry")
-async get_titan_telemetry():
+@app.get("/system/titan/telemetry")  # ERROR FIXED: Added "def" keyword
+async def get_titan_telemetry():
     """Titan telemetry endpoint - from your logs"""
     return {
         "success": True,
