@@ -1,5 +1,15 @@
 {
-    "enabled_modules": ["orchestrator", "testing", "sys_diagnostics", "code_formatter", "prompt_manager", "code_intelligence", "code_reviewer"],
+    "enabled_modules": [
+        "orchestrator", 
+        "testing", 
+        "sys_diagnostics", 
+        "code_formatter", 
+        "prompt_manager", 
+        "code_intelligence", 
+        "code_reviewer",
+        "auth",
+        "ui_layout"
+    ],
     "auto_start": true,
     "module_settings": {
         "orchestrator": {
@@ -30,6 +40,14 @@
             "enabled": true,
             "auto_review": false,
             "strict_mode": true
+        },
+        "auth": {
+            "enabled": true,
+            "provider": "google"
+        },
+        "ui_layout": {
+            "enabled": true,
+            "responsive": true
         }
     }
 }
