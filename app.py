@@ -87,7 +87,7 @@ class ModuleManager:
         print("✅ Senior Logic: ENABLED | UI Sanitizer: ACTIVE")
         print("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")
         
-        # Initialize Groq client first (WITHOUT proxies)
+        # Initialize Groq client first (WITHOUT proxies) - FIXED ERROR
         self._init_groq_client()
         
         for module_name in self.module_config["enabled_modules"]:
@@ -98,21 +98,39 @@ class ModuleManager:
         print("=" * 60)
     
     def _init_groq_client(self):
-        """Initialize Groq client WITHOUT proxies parameter"""
+        """Initialize Groq client WITHOUT proxies parameter - FIXED"""
         try:
             from groq import Groq
+            
+            # Get API key from environment
             api_key = os.environ.get("GROQ_API_KEY")
-            if api_key:
-                # CORRECT: Initialize WITHOUT proxies - FIXED FIRST ERROR
-                self.client = Groq(api_key=api_key)
-                print("✅ Groq client initialized successfully")
-                self.app.state.groq_available = True
-            else:
-                print("⚠️ GROQ_API_KEY not found in environment")
+            
+            if not api_key or not api_key.strip():
+                print("⚠️ GROQ_API_KEY not found or empty in environment")
+                print(f"Available env vars: {[k for k in os.environ.keys() if 'GROQ' in k.upper() or 'API' in k.upper()]}")
                 self.client = None
                 self.app.state.groq_available = False
+                return
+            
+            # Clean the API key
+            api_key = api_key.strip()
+            
+            # IMPORTANT: Groq 0.9.0 ONLY accepts api_key parameter
+            # NO proxies parameter allowed!
+            self.client = Groq(api_key=api_key)
+            
+            print("✅ Groq client initialized successfully")
+            self.app.state.groq_available = True
+            
+        except TypeError as e:
+            if "proxies" in str(e):
+                print(f"❌ Groq initialization error: 'proxies' parameter not supported")
+                print(f"❌ Try removing proxies parameter from Groq() call")
+            print(f"❌ Groq client initialization failed: {e}")
+            self.client = None
+            self.app.state.groq_available = False
         except Exception as e:
-            print(f"⚠️ Groq client initialization failed: {e}")
+            print(f"❌ Groq client initialization failed: {e}")
             self.client = None
             self.app.state.groq_available = False
     
@@ -939,7 +957,11 @@ async def get_ui():
 @app.head("/")
 async def head_root():
     """Allow HEAD requests for health checks - FIXED SECOND ERROR"""
-    return JSONResponse({"status": "ok"})  # FIX: Return JSONResponse instead of dict
+    # Return JSONResponse instead of dict to fix AttributeError
+    return JSONResponse(
+        content={"status": "ok", "service": "AumCore AI", "version": AumCoreConfig.VERSION},
+        status_code=200
+    )
 
 @app.post("/reset")
 async def reset():
@@ -968,10 +990,28 @@ async def chat(message: str = Form(...)):
         client = app.state.module_manager.get_groq_client()
         
         if not client:
-            return {
-                "response": f"Hello! I'm AumCore AI v{AumCoreConfig.VERSION}. Your message: '{message}' was received.\n\nGROQ API not configured. Please add GROQ_API_KEY to environment variables.\n\nTry module features from sidebar.",
-                "modules": list(app.state.module_manager.loaded_modules.keys())
-            }
+            # Improved error message
+            error_msg = f"""
+Hello! I'm AumCore AI v{AumCoreConfig.VERSION}. 
+
+Your message: '{message}' was received.
+
+⚠️ **GROQ API Status:** 
+   • API Key: {'✅ Found' if os.environ.get('GROQ_API_KEY') else '❌ Missing'}
+   • Client Initialized: {'✅ Yes' if hasattr(app.state, 'groq_available') and app.state.groq_available else '❌ No'}
+   • Module Manager Client: {'✅ Available' if app.state.module_manager.client else '❌ None'}
+
+🔧 **Available Modules:** {list(app.state.module_manager.loaded_modules.keys())}
+
+💡 **Try these module features from sidebar:**
+   • System Diagnostics
+   • Code Formatter
+   • Code Review
+   • Automated Testing
+
+**To fix:** Ensure GROQ_API_KEY is properly set in environment variables.
+"""
+            return {"response": error_msg}
         
         # Try to import core modules
         try:
