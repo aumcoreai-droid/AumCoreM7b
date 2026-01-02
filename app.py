@@ -103,7 +103,7 @@ class ModuleManager:
             from groq import Groq
             api_key = os.environ.get("GROQ_API_KEY")
             if api_key:
-                # CORRECT: Initialize WITHOUT proxies
+                # CORRECT: Initialize WITHOUT proxies - FIXED FIRST ERROR
                 self.client = Groq(api_key=api_key)
                 print("✅ Groq client initialized successfully")
                 self.app.state.groq_available = True
@@ -936,10 +936,10 @@ async def get_ui():
     """Main UI endpoint"""
     return HTMLResponse(content=HTML_UI)
 
-@app.head("/", response_class=HTMLResponse)
+@app.head("/")
 async def head_root():
-    """Allow HEAD requests for health checks"""
-    return {"status": "ok"}
+    """Allow HEAD requests for health checks - FIXED SECOND ERROR"""
+    return JSONResponse({"status": "ok"})  # FIX: Return JSONResponse instead of dict
 
 @app.post("/reset")
 async def reset():
